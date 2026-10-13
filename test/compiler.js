@@ -272,8 +272,7 @@ function luaValue(value) {
 function emitLua(program) {
   const constants = `{${program.constants.map(luaValue).join(",")}}`;
   const code = `{${program.code.map(row => `{${row.map(v => typeof v === "string" ? `"${v}"` : v).join(",")}}`).join(",")}}`;
-  return `-- LuaMoon VM Obfuscator MVP
--- Custom bytecode format; generated code only supports the documented subset.
+  return `-- This file was protected using Luamoon Obfuscator v1.0 [https://obfuscation.jixyuk12nh.workers.dev/]
 return (function()
 local C=${constants}
 local B=${code}
