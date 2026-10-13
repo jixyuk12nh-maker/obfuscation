@@ -2,6 +2,10 @@
 
 This repository is a deployable starter for the LuaMoon web UI and API. Connect the repository to Cloudflare Workers Builds, or deploy with Wrangler. A push to the connected Git branch can trigger a new deployment.
 
+## Compiler version
+
+The compiler emits the `Luamoon Obfuscator v2.0` wrapper. VM source and string/number constants are encoded, and bytecode opcode IDs are randomized per compilation. This is a lightweight custom VM design, not cryptographically secure encryption.
+
 ## Important scope and limitations
 
 - This is an original, small Lua-subset-to-custom-VM prototype, **not** a Luraph source-code recovery or clone.
