@@ -193,10 +193,62 @@ class Parser {
   }
 }
 
-function compileAst(ast) {
+const OPCODES = [
+  "PUSH", "LOAD", "STORE", "NEG", "NOT", "LEN", "ADD", "SUB", "MUL", "DIV",
+  "MOD", "POW", "CONCAT", "EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR",
+  "CALL", "JMP", "JMPF", "RETURN"
+];
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6D2B79F5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleArray(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function encodeXorRotate(value, rng) {
+  const bytes = new TextEncoder().encode(value);
+  const key = Array.from({ length: 4 }, () => 1 + Math.floor(rng() * 254));
+  const rot = 1 + Math.floor(rng() * 7);
+  const out = new Uint8Array(bytes.length + 5);
+  out[0] = rot;
+  out.set(key, 1);
+  for (let i = 0; i < bytes.length; i++) {
+    const x = bytes[i] ^ key[i % 4];
+    out[i + 5] = ((x << rot) | (x >>> (8 - rot))) & 0xff;
+  }
+  return out;
+}
+
+function encodeConstant(value, rng) {
+  if (value === null) return { tag: "z", bytes: new Uint8Array(0) };
+  if (typeof value === "boolean") return { tag: value ? "t" : "f", bytes: new Uint8Array(0) };
+  if (typeof value === "number") return { tag: "n", bytes: encodeXorRotate(String(value), rng) };
+  return { tag: "s", bytes: encodeXorRotate(String(value), rng) };
+}
+
+function bytesToLuaArray(bytes) {
+  return bytes.length ? `{${Array.from(bytes).join(",")}}` : "{}";
+}
+
+function compileAst(ast, rng) {
   const code = [];
   const constants = [];
   const constantMap = new Map();
+
   function constant(value) {
     const key = `${typeof value}:${JSON.stringify(value)}`;
     if (!constantMap.has(key)) {
@@ -214,10 +266,14 @@ function compileAst(ast) {
     switch (n.type) {
       case "constant": emit("PUSH", constant(n.value)); break;
       case "variable": emit("LOAD", constant(n.name)); break;
-      case "unary": expr(n.value); emit(n.op === "-" ? "NEG" : n.op === "not" ? "NOT" : "LEN"); break;
+      case "unary":
+        expr(n.value);
+        emit(n.op === "-" ? "NEG" : n.op === "not" ? "NOT" : "LEN");
+        break;
       case "binary":
-        expr(n.left); expr(n.right);
-        emit(({"+":"ADD","-":"SUB","*":"MUL","/":"DIV","%":"MOD","^":"POW","..":"CONCAT","==":"EQ","~=":"NE","<":"LT","<=":"LE",">":"GT",">=":"GE","and":"AND","or":"OR"})[n.op]);
+        expr(n.left);
+        expr(n.right);
+        emit(({ "+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "^": "POW", "..": "CONCAT", "==": "EQ", "~=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE", "and": "AND", "or": "OR" })[n.op]);
         break;
       default: throw new Error("Internal compiler error: unknown expression.");
     }
@@ -254,124 +310,137 @@ function compileAst(ast) {
   block(ast);
   emit("PUSH", constant(null));
   emit("RETURN");
-  return { code, constants };
-}
-
-function luaString(value) {
-  let out = '"';
-  for (const ch of value) {
-    const code = ch.codePointAt(0);
-    if (ch === "\\") out += "\\\\";
-    else if (ch === '"') out += '\\"';
-    else if (ch === "\n") out += "\\n";
-    else if (ch === "\r") out += "\\r";
-    else if (ch === "\t") out += "\\t";
-    else if (code < 32 || code === 127) out += `\\${String(code).padStart(3, "0")}`;
-    else out += ch;
-  }
-  return out + '"';
-}
-
-function luaValue(value) {
-  if (value === null) return "nil";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("Cannot emit a non-finite number.");
-    return String(value);
-  }
-  return luaString(String(value));
+  return { code, constants, rng };
 }
 
 function emitLua(program) {
-  const constants = `{${program.constants.map(luaValue).join(",")}}`;
-  const code = `{${program.code.map(row => `{${row.map(v => typeof v === "string" ? `"${v}"` : v).join(",")}}`).join(",")}}`;
-  return `-- This file was protected using Luamoon Obfuscator v1.0 [https://obfuscation.jixyuk12nh.workers.dev/]
-return (function()
-local C=${constants}
-local B=${code}
-local S={}
-local V={}
-local L={}
-local LD={}
-local pc=1
+  const rng = program.rng;
+  const shuffledIds = shuffleArray(Array.from({ length: 256 }, (_, i) => i), rng);
+  const opIds = new Map(OPCODES.map((op, i) => [op, shuffledIds[i]]));
+  const encodedConstants = program.constants.map(value => encodeConstant(value, rng));
+  const constLua = `{${encodedConstants.map(entry => {
+    if (entry.tag === "z" || entry.tag === "t" || entry.tag === "f") return `{${JSON.stringify(entry.tag)}}`;
+    return `{${JSON.stringify(entry.tag)},${bytesToLuaArray(entry.bytes)}}`;
+  }).join(",")}}`;
+  const codeLua = `{${program.code.map(row => `{${opIds.get(row[0])},${row[1]},${row[2]}}`).join(",")}}`;
+  const decoder = OPCODES.map((name, i) => `${i === 0 ? "if" : "elseif"} id==${opIds.get(name)} then return ${JSON.stringify(name)}`).join("\n") + "\nend";
+
+  const innerVmSource = `local function _vm(BC,CT)
+local S,L,LD,V,pc={},{},{},{},1
+local function pop() local n=#S local v=S[n] S[n]=nil return v end
+local function push(v) S[#S+1]=v end
 local function truth(v) return v~=nil and v~=false end
-local function pop()
- local n=#S
- local v=S[n]
- S[n]=nil
- return v
+local function ds(bl)
+local rot=bl[1]
+local keys={bl[2],bl[3],bl[4],bl[5]}
+local out={}
+for i=6,#bl do
+local b=bit32.bxor(bl[i],keys[(i-6)%4+1])
+b=bit32.band(bit32.bor(bit32.lshift(b,8-rot),bit32.rshift(b,rot)),255)
+out[#out+1]=string.char(b)
 end
-local function run()
- while true do
-  local I=B[pc]
-  if not I then return nil end
-  pc=pc+1
-  local op,a,b=I[1],I[2],I[3]
-  if op=="PUSH" then
-   S[#S+1]=C[a]
-  elseif op=="LOAD" then
-   local name=C[a]
-   if LD[name] then
-    S[#S+1]=L[name]
-   else
-    local value=V[name]
-    if value==nil then value=_G[name] end
-    S[#S+1]=value
-   end
-  elseif op=="STORE" then
-   local name=C[a]
-   local value=pop()
-   if b==1 then
-    LD[name]=true
-    L[name]=value
-   else
-    V[name]=value
-   end
-  elseif op=="NEG" then S[#S+1]=-(tonumber(pop()) or 0)
-  elseif op=="NOT" then S[#S+1]=not truth(pop())
-  elseif op=="LEN" then local value=pop() S[#S+1]=#value
-  elseif op=="ADD" then local y,x=pop(),pop() S[#S+1]=x+y
-  elseif op=="SUB" then local y,x=pop(),pop() S[#S+1]=x-y
-  elseif op=="MUL" then local y,x=pop(),pop() S[#S+1]=x*y
-  elseif op=="DIV" then local y,x=pop(),pop() S[#S+1]=x/y
-  elseif op=="MOD" then local y,x=pop(),pop() S[#S+1]=x%y
-  elseif op=="POW" then local y,x=pop(),pop() S[#S+1]=x^y
-  elseif op=="CONCAT" then local y,x=pop(),pop() S[#S+1]=tostring(x)..tostring(y)
-  elseif op=="EQ" then local y,x=pop(),pop() S[#S+1]=x==y
-  elseif op=="NE" then local y,x=pop(),pop() S[#S+1]=x~=y
-  elseif op=="LT" then local y,x=pop(),pop() S[#S+1]=x<y
-  elseif op=="LE" then local y,x=pop(),pop() S[#S+1]=x<=y
-  elseif op=="GT" then local y,x=pop(),pop() S[#S+1]=x>y
-  elseif op=="GE" then local y,x=pop(),pop() S[#S+1]=x>=y
-  elseif op=="AND" then
-   local y,x=pop(),pop()
-   if truth(x) then S[#S+1]=y else S[#S+1]=x end
-  elseif op=="OR" then
-   local y,x=pop(),pop()
-   if truth(x) then S[#S+1]=x else S[#S+1]=y end
-  elseif op=="CALL" then
-   local args={}
-   for j=b,1,-1 do args[j]=pop() end
-   local name=C[a]
-   local f=V[name]
-   if type(f)~="function" then f=_G[name] end
-   if type(f)~="function" then error("LuaMoon VM: function not found: "..tostring(name),0) end
-   f((table.unpack or unpack)(args))
-  elseif op=="JMP" then pc=a
-  elseif op=="JMPF" then if not truth(pop()) then pc=a end
-  elseif op=="RETURN" then return pop()
-  else error("LuaMoon VM: invalid opcode "..tostring(op),0) end
- end
+return table.concat(out)
 end
-return run()
+local function gc(i)
+local e=CT[i]
+if not e then return nil end
+if e[1]=="s" then return ds(e[2]) end
+if e[1]=="n" then return tonumber(ds(e[2])) end
+if e[1]=="z" then return nil end
+if e[1]=="t" then return true end
+if e[1]=="f" then return false end
+end
+local function op(id)
+${decoder}
+return nil
+end
+local function step(ins)
+local o=op(ins[1])
+if not o then error("LuaMoon VM: invalid opcode",0) end
+local a,b=ins[2],ins[3]
+if o=="PUSH" then push(gc(a))
+elseif o=="LOAD" then
+local name=gc(a)
+if LD[name] then push(L[name]) else local v=V[name] if v==nil then v=_G[name] end push(v) end
+elseif o=="STORE" then
+local name=gc(a) local v=pop()
+if b==1 then LD[name]=true L[name]=v else V[name]=v _G[name]=v end
+elseif o=="NEG" then push(-(tonumber(pop()) or 0))
+elseif o=="NOT" then push(not truth(pop()))
+elseif o=="LEN" then push(#pop())
+elseif o=="ADD" then local y,x=pop(),pop() push(x+y)
+elseif o=="SUB" then local y,x=pop(),pop() push(x-y)
+elseif o=="MUL" then local y,x=pop(),pop() push(x*y)
+elseif o=="DIV" then local y,x=pop(),pop() push(x/y)
+elseif o=="MOD" then local y,x=pop(),pop() push(x%y)
+elseif o=="POW" then local y,x=pop(),pop() push(x^y)
+elseif o=="CONCAT" then local y,x=pop(),pop() push(tostring(x)..tostring(y))
+elseif o=="EQ" then local y,x=pop(),pop() push(x==y)
+elseif o=="NE" then local y,x=pop(),pop() push(x~=y)
+elseif o=="LT" then local y,x=pop(),pop() push(x<y)
+elseif o=="LE" then local y,x=pop(),pop() push(x<=y)
+elseif o=="GT" then local y,x=pop(),pop() push(x>y)
+elseif o=="GE" then local y,x=pop(),pop() push(x>=y)
+elseif o=="AND" then local y,x=pop(),pop() if truth(x) then push(y) else push(x) end
+elseif o=="OR" then local y,x=pop(),pop() if truth(x) then push(x) else push(y) end
+elseif o=="CALL" then
+local args={} for j=b,1,-1 do args[j]=pop() end
+local name=gc(a) local f
+if LD[name] then f=L[name] else f=V[name] if type(f)~="function" then f=_G[name] end end
+if type(f)~="function" then error("LuaMoon VM: function not found: "..tostring(name),0) end
+f((table.unpack or unpack)(args))
+elseif o=="JMP" then pc=a
+elseif o=="JMPF" then if not truth(pop()) then pc=a end
+elseif o=="RETURN" then return true,pop()
+end
+return false,nil
+end
+while true do
+local ins=BC[pc]
+if not ins then return nil end
+pc=pc+1
+local done,value=step(ins)
+if done then return value end
+end
+end
+return _vm`;
+
+  const encryptedVm = encodeXorRotate(innerVmSource, rng);
+  return `-- This file was protected using Luamoon Obfuscator v2.0 [https://obfuscation.jixyuk12nh.workers.dev/]
+return (function()
+local _KW=${bytesToLuaArray(encryptedVm)}
+local _CT=${constLua}
+local _BC=${codeLua}
+local function _dk(bl)
+local rot=bl[1]
+local keys={bl[2],bl[3],bl[4],bl[5]}
+local out={}
+for i=6,#bl do
+local b=bit32.bxor(bl[i],keys[(i-6)%4+1])
+b=bit32.band(bit32.bor(bit32.lshift(b,8-rot),bit32.rshift(b,rot)),255)
+out[#out+1]=string.char(b)
+end
+return table.concat(out)
+end
+local _src=_dk(_KW)
+local _loader=loadstring or load
+if type(_loader)~="function" then error("LuaMoon VM: dynamic code loading is unavailable",0) end
+local _chunk,_err=_loader(_src)
+if not _chunk then error(_err or "LuaMoon VM: failed to initialize",0) end
+return _chunk()(_BC,_CT)
 end)()
 `;
-
 }
 
-export function compileLuaSubset(source) {
-  if (source.length > 1_000_000) throw new Error("Input too large (limit 1 MB).");
+export function compileLuaSubset(source, options = {}) {
+  if (typeof source !== "string") throw new Error("Source must be a string.");
+  const byteLength = new TextEncoder().encode(source).byteLength;
+  const maxBytes = 50 * 1024 * 1024;
+  if (byteLength > maxBytes) {
+    throw new Error(`Input too large (limit 50MB, got ${(byteLength / (1024 * 1024)).toFixed(2)}MB).`);
+  }
+  const seed = Number.isInteger(options.seed) ? options.seed : ((Math.random() * 0x7fffffff) | 0);
+  const rng = mulberry32(seed);
   const ast = new Parser(lex(source)).parse();
-  const program = compileAst(ast);
-  return emitLua(program);
+  return emitLua(compileAst(ast, rng));
 }
