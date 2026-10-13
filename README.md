@@ -9,7 +9,7 @@ This repository is a deployable starter for the LuaMoon web UI and API. Connect 
 - The current compiler does not implement functions/closures, tables, indexing, method calls, numeric/generic `for`, repeat/until, varargs, Luau type syntax, and many standard-language edge cases.
 - Obfuscation is not encryption and does not guarantee that source code cannot be recovered.
 - The output must be tested in the exact Lua/Luau runtime where it will run. The generated wrapper uses Lua features such as `table.unpack or unpack`, and runtime globals can differ between environments.
-- The source limit for the web API is 200,000 characters. Adjust carefully after adding stronger rate limits and abuse protection.
+- The web API accepts source files up to 50 MiB, but the parser and compiler are synchronous and large inputs can consume substantial CPU and memory. Consider lowering this limit before public launch and add rate limiting.
 
 ## Deploy from Android / GitHub
 
