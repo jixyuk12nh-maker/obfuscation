@@ -1,4 +1,5 @@
-const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+
 const sourceEl = document.querySelector("#source");
 const outputEl = document.querySelector("#output");
 const compileBtn = document.querySelector("#compile");
@@ -9,145 +10,309 @@ const sourceCount = document.querySelector("#sourceCount");
 const outputCount = document.querySelector("#outputCount");
 const fileInput = document.querySelector("#fileInput");
 const uploadBtn = document.querySelector("#uploadFile");
-const sourcePane = document.querySelector("#sourcePane");
+const loadExampleBtn = document.querySelector("#loadExample");
 const fileInfo = document.querySelector("#fileInfo");
 const fileName = document.querySelector("#fileName");
 const fileSize = document.querySelector("#fileSize");
 const removeFileBtn = document.querySelector("#removeFile");
-const defaultCompileMarkup = compileBtn.innerHTML;
+const sourceDropzone = document.querySelector("#sourceDropzone");
+const dropHint = document.querySelector("#dropHint");
+const outputEmpty = document.querySelector("#outputEmpty");
 
-function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+let isCompiling = false;
+let loadedFile = null;
+
+const statusDot = statusEl.querySelector(".status-dot");
+
+function setStatus(message, kind = "") {
+    statusEl.replaceChildren(
+        statusDot,
+        document.createTextNode(message)
+    );
+
+    statusEl.className = kind;
 }
 
-function setStatus(text, kind = "") {
-  statusEl.textContent = text;
-  statusEl.className = kind;
+function formatSize(bytes) {
+    if (bytes >= 1024 * 1024) {
+        return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    if (bytes >= 1024) {
+        return `${(bytes / 1024).toFixed(2)} KB`;
+    }
+
+    return `${bytes} bytes`;
 }
 
 function updateCounts() {
-  sourceCount.textContent = `${sourceEl.value.length.toLocaleString()} characters`;
-  outputCount.textContent = outputEl.value ? `${outputEl.value.length.toLocaleString()} characters` : "No output yet";
+    const sourceBytes = new Blob([sourceEl.value]).size;
+
+    sourceCount.textContent =
+        `${sourceEl.value.length.toLocaleString()} characters · ${formatSize(sourceBytes)}`;
+
+    if (outputEl.value) {
+        const outputBytes = new Blob([outputEl.value]).size;
+
+        outputCount.textContent =
+            `${outputEl.value.length.toLocaleString()} characters · ${formatSize(outputBytes)}`;
+    } else {
+        outputCount.textContent = "No output yet";
+    }
+
+    outputEmpty.hidden = Boolean(outputEl.value);
 }
 
-function clearFileInfo() {
-  fileInfo.hidden = true;
-  fileName.textContent = "";
-  fileSize.textContent = "";
-  fileInput.value = "";
+function checkSourceSize() {
+    const bytes = new Blob([sourceEl.value]).size;
+
+    if (bytes > MAX_FILE_SIZE) {
+        setStatus(
+            `Source exceeds 50 MB (${formatSize(bytes)})`,
+            "error"
+        );
+
+        compileBtn.disabled = true;
+        return false;
+    }
+
+    compileBtn.disabled = isCompiling;
+    return true;
 }
 
-async function readSourceFile(file) {
-  if (!file) return;
-  if (file.size > MAX_FILE_BYTES) {
-    setStatus(`File is over 50 MB (${formatFileSize(file.size)})`, "error");
-    fileInput.value = "";
-    return;
-  }
-  if (!/\.(lua|txt)$/i.test(file.name)) {
-    setStatus("Choose a .lua or .txt file", "error");
-    fileInput.value = "";
-    return;
-  }
-
-  setStatus("Reading file…", "loading");
-  try {
-    sourceEl.value = await file.text();
-    fileName.textContent = file.name;
-    fileSize.textContent = formatFileSize(file.size);
-    fileInfo.hidden = false;
-    updateCounts();
-    setStatus("File loaded", "success");
-  } catch (error) {
-    setStatus("Could not read this file", "error");
-  }
-}
-
-sourceEl.addEventListener("input", updateCounts);
-
-document.querySelector("#loadExample").addEventListener("click", () => {
-  clearFileInfo();
-  sourceEl.value = `local functionName = "LuaMoon"\nlocal amount = 3\nif amount >= 3 then\n    print(functionName .. " VM ready")\nelse\n    warn("not ready")\nend`;
-  updateCounts();
-  setStatus("Example loaded", "success");
-});
-
-uploadBtn.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", event => readSourceFile(event.target.files?.[0]));
-removeFileBtn.addEventListener("click", () => {
-  clearFileInfo();
-  sourceEl.value = "";
-  updateCounts();
-  setStatus("File removed");
-});
-
-["dragenter", "dragover"].forEach(type => sourcePane.addEventListener(type, event => {
-  event.preventDefault();
-  sourcePane.classList.add("dragging");
-}));
-["dragleave", "drop"].forEach(type => sourcePane.addEventListener(type, event => {
-  event.preventDefault();
-  sourcePane.classList.remove("dragging");
-}));
-sourcePane.addEventListener("drop", event => readSourceFile(event.dataTransfer?.files?.[0]));
-
-compileBtn.addEventListener("click", async () => {
-  if (!sourceEl.value.trim()) {
-    setStatus("Add source code first", "error");
-    sourceEl.focus();
-    return;
-  }
-  compileBtn.disabled = true;
-  compileBtn.textContent = "Compiling…";
-  setStatus("Compiling", "loading");
-  try {
-    const response = await fetch("/api/obfuscate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: sourceEl.value })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Compilation failed.");
-    if (typeof data.output !== "string") throw new Error("The server returned no output.");
-    outputEl.value = data.output;
-    copyBtn.disabled = false;
-    downloadBtn.disabled = false;
-    updateCounts();
-    setStatus("Compiled", "success");
-  } catch (error) {
-    setStatus("Compilation error", "error");
-    outputEl.value = `-- ${error.message}`;
+function clearOutput() {
+    outputEl.value = "";
     copyBtn.disabled = true;
     downloadBtn.disabled = true;
     updateCounts();
-  } finally {
-    compileBtn.disabled = false;
-    compileBtn.innerHTML = defaultCompileMarkup;
-  }
+}
+
+function resetLoadedFile() {
+    loadedFile = null;
+    fileInput.value = "";
+    fileInfo.hidden = true;
+    fileName.textContent = "";
+    fileSize.textContent = "";
+}
+
+async function loadFile(file) {
+    if (!file) return;
+
+    if (file.size > MAX_FILE_SIZE) {
+        setStatus("File exceeds the 50 MB limit", "error");
+        return;
+    }
+
+    const extensionAllowed = /\.(lua|txt)$/i.test(file.name);
+
+    if (!extensionAllowed && file.type !== "text/plain") {
+        setStatus("Choose a .lua or .txt file", "error");
+        return;
+    }
+
+    try {
+        const text = await file.text();
+
+        sourceEl.value = text;
+        loadedFile = file;
+
+        fileName.textContent = file.name;
+        fileSize.textContent = formatSize(file.size);
+        fileInfo.hidden = false;
+
+        clearOutput();
+        updateCounts();
+        checkSourceSize();
+
+        setStatus("File loaded", "success");
+    } catch {
+        setStatus("Unable to read this file", "error");
+    }
+}
+
+sourceEl.addEventListener("input", () => {
+    clearOutput();
+    updateCounts();
+
+    if (checkSourceSize()) {
+        setStatus("Ready");
+    }
+});
+
+uploadBtn.addEventListener("click", () => {
+    fileInput.click();
+});
+
+fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+
+    if (file) {
+        await loadFile(file);
+    }
+
+    fileInput.value = "";
+});
+
+removeFileBtn.addEventListener("click", () => {
+    resetLoadedFile();
+    sourceEl.value = "";
+
+    clearOutput();
+    updateCounts();
+    checkSourceSize();
+
+    setStatus("File removed");
+    sourceEl.focus();
+});
+
+loadExampleBtn.addEventListener("click", () => {
+    resetLoadedFile();
+
+    sourceEl.value = [
+        'local name = "LuaMoon"',
+        "local count = 2",
+        "if count > 1 then",
+        '    print(name .. " VM ready")',
+        "else",
+        '    warn("not ready")',
+        "end"
+    ].join("\n");
+
+    clearOutput();
+    updateCounts();
+    checkSourceSize();
+
+    setStatus("Example loaded", "success");
+});
+
+for (const eventName of ["dragenter", "dragover"]) {
+    sourceDropzone.addEventListener(eventName, event => {
+        event.preventDefault();
+        sourceDropzone.classList.add("drag-active");
+        dropHint.hidden = false;
+    });
+}
+
+for (const eventName of ["dragleave", "dragend"]) {
+    sourceDropzone.addEventListener(eventName, event => {
+        if (
+            eventName === "dragleave" &&
+            sourceDropzone.contains(event.relatedTarget)
+        ) {
+            return;
+        }
+
+        sourceDropzone.classList.remove("drag-active");
+        dropHint.hidden = true;
+    });
+}
+
+sourceDropzone.addEventListener("drop", async event => {
+    event.preventDefault();
+
+    sourceDropzone.classList.remove("drag-active");
+    dropHint.hidden = true;
+
+    const file = event.dataTransfer?.files?.[0];
+
+    if (file) {
+        await loadFile(file);
+    }
+});
+
+compileBtn.addEventListener("click", async () => {
+    if (isCompiling || !checkSourceSize()) return;
+
+    if (!sourceEl.value.trim()) {
+        setStatus("Enter Lua source code first", "error");
+        sourceEl.focus();
+        return;
+    }
+
+    isCompiling = true;
+    compileBtn.disabled = true;
+    compileBtn.innerHTML = 'Compiling… <span aria-hidden="true">⏳</span>';
+
+    setStatus("Compiling");
+
+    try {
+        const response = await fetch("/api/obfuscate", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                source: sourceEl.value
+            })
+        });
+
+        let data;
+
+        try {
+            data = await response.json();
+        } catch {
+            throw new Error("The server returned an invalid response.");
+        }
+
+        if (!response.ok) {
+            throw new Error(data.error || "Compilation failed.");
+        }
+
+        if (typeof data.output !== "string") {
+            throw new Error("The server returned no generated output.");
+        }
+
+        outputEl.value = data.output;
+
+        copyBtn.disabled = !data.output;
+        downloadBtn.disabled = !data.output;
+
+        updateCounts();
+        setStatus("Compilation successful", "success");
+    } catch (error) {
+        clearOutput();
+        setStatus(error.message || "Compilation failed", "error");
+    } finally {
+        isCompiling = false;
+        compileBtn.innerHTML = 'Obfuscate <span aria-hidden="true">→</span>';
+        checkSourceSize();
+    }
 });
 
 copyBtn.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(outputEl.value);
-    setStatus("Copied", "success");
-  } catch (error) {
-    outputEl.focus();
-    outputEl.select();
-    setStatus("Select and copy manually", "error");
-  }
+    if (!outputEl.value) return;
+
+    try {
+        await navigator.clipboard.writeText(outputEl.value);
+        setStatus("Copied to clipboard", "success");
+    } catch {
+        outputEl.focus();
+        outputEl.select();
+        setStatus("Select the output and copy it manually", "error");
+    }
 });
 
 downloadBtn.addEventListener("click", () => {
-  if (!outputEl.value) return;
-  const blob = new Blob([outputEl.value], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "luamoon-obfuscated.lua";
-  link.click();
-  URL.revokeObjectURL(url);
+    if (!outputEl.value) return;
+
+    const blob = new Blob(
+        [outputEl.value],
+        { type: "text/plain;charset=utf-8" }
+    );
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = "luamoon-obfuscated.lua";
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 updateCounts();
+checkSourceSize();
+setStatus("Ready");
