@@ -257,6 +257,21 @@ function compileAst(ast) {
   return { code, constants };
 }
 
+function luaString(value) {
+  let out = '"';
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (ch === "\\") out += "\\\\";
+    else if (ch === '"') out += '\\"';
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (code < 32 || code === 127) out += `\\${String(code).padStart(3, "0")}`;
+    else out += ch;
+  }
+  return out + '"';
+}
+
 function luaValue(value) {
   if (value === null) return "nil";
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -264,34 +279,57 @@ function luaValue(value) {
     if (!Number.isFinite(value)) throw new Error("Cannot emit a non-finite number.");
     return String(value);
   }
-  return JSON.stringify(value).replace(/\\u2028/g, "\\226\\128\\168").replace(/\\u2029/g, "\\226\\128\\169");
+  return luaString(String(value));
 }
 
 function emitLua(program) {
   const constants = `{${program.constants.map(luaValue).join(",")}}`;
   const code = `{${program.code.map(row => `{${row.map(v => typeof v === "string" ? `"${v}"` : v).join(",")}}`).join(",")}}`;
-  return `-- LuaMoon VM Obfuscator MVP
--- Custom bytecode format; generated code only supports the documented subset.
+  return `-- This file was protected using Luamoon Obfuscator v1.0 [https://obfuscation.jixyuk12nh.workers.dev/]
 return (function()
 local C=${constants}
 local B=${code}
 local S={}
 local V={}
+local L={}
+local LD={}
 local pc=1
 local function truth(v) return v~=nil and v~=false end
-local function pop() local n=#S local v=S[n] S[n]=nil return v end
+local function pop()
+ local n=#S
+ local v=S[n]
+ S[n]=nil
+ return v
+end
 local function run()
  while true do
   local I=B[pc]
   if not I then return nil end
   pc=pc+1
   local op,a,b=I[1],I[2],I[3]
-  if op=="PUSH" then S[#S+1]=C[a]
-  elseif op=="LOAD" then S[#S+1]=V[C[a]]
-  elseif op=="STORE" then V[C[a]]=pop()
+  if op=="PUSH" then
+   S[#S+1]=C[a]
+  elseif op=="LOAD" then
+   local name=C[a]
+   if LD[name] then
+    S[#S+1]=L[name]
+   else
+    local value=V[name]
+    if value==nil then value=_G[name] end
+    S[#S+1]=value
+   end
+  elseif op=="STORE" then
+   local name=C[a]
+   local value=pop()
+   if b==1 then
+    LD[name]=true
+    L[name]=value
+   else
+    V[name]=value
+   end
   elseif op=="NEG" then S[#S+1]=-(tonumber(pop()) or 0)
   elseif op=="NOT" then S[#S+1]=not truth(pop())
-  elseif op=="LEN" then local v=pop() S[#S+1]=#v
+  elseif op=="LEN" then local value=pop() S[#S+1]=#value
   elseif op=="ADD" then local y,x=pop(),pop() S[#S+1]=x+y
   elseif op=="SUB" then local y,x=pop(),pop() S[#S+1]=x-y
   elseif op=="MUL" then local y,x=pop(),pop() S[#S+1]=x*y
@@ -299,25 +337,30 @@ local function run()
   elseif op=="MOD" then local y,x=pop(),pop() S[#S+1]=x%y
   elseif op=="POW" then local y,x=pop(),pop() S[#S+1]=x^y
   elseif op=="CONCAT" then local y,x=pop(),pop() S[#S+1]=tostring(x)..tostring(y)
-  elseif op=="EQ" then local y,x=pop(),pop() S[#S+1]=(x==y)
-  elseif op=="NE" then local y,x=pop(),pop() S[#S+1]=(x~=y)
-  elseif op=="LT" then local y,x=pop(),pop() S[#S+1]=(x<y)
-  elseif op=="LE" then local y,x=pop(),pop() S[#S+1]=(x<=y)
-  elseif op=="GT" then local y,x=pop(),pop() S[#S+1]=(x>y)
-  elseif op=="GE" then local y,x=pop(),pop() S[#S+1]=(x>=y)
-  elseif op=="AND" then local y,x=pop(),pop() S[#S+1]=(truth(x) and y or x)
-  elseif op=="OR" then local y,x=pop(),pop() S[#S+1]=(truth(x) and x or y)
+  elseif op=="EQ" then local y,x=pop(),pop() S[#S+1]=x==y
+  elseif op=="NE" then local y,x=pop(),pop() S[#S+1]=x~=y
+  elseif op=="LT" then local y,x=pop(),pop() S[#S+1]=x<y
+  elseif op=="LE" then local y,x=pop(),pop() S[#S+1]=x<=y
+  elseif op=="GT" then local y,x=pop(),pop() S[#S+1]=x>y
+  elseif op=="GE" then local y,x=pop(),pop() S[#S+1]=x>=y
+  elseif op=="AND" then
+   local y,x=pop(),pop()
+   if truth(x) then S[#S+1]=y else S[#S+1]=x end
+  elseif op=="OR" then
+   local y,x=pop(),pop()
+   if truth(x) then S[#S+1]=x else S[#S+1]=y end
   elseif op=="CALL" then
    local args={}
    for j=b,1,-1 do args[j]=pop() end
-   local f=V[C[a]]
-   if type(f)~="function" then f=_G[C[a]] end
-   if type(f)~="function" then error("LuaMoon VM: function not found: "..tostring(C[a])) end
+   local name=C[a]
+   local f=V[name]
+   if type(f)~="function" then f=_G[name] end
+   if type(f)~="function" then error("LuaMoon VM: function not found: "..tostring(name),0) end
    f((table.unpack or unpack)(args))
   elseif op=="JMP" then pc=a
   elseif op=="JMPF" then if not truth(pop()) then pc=a end
   elseif op=="RETURN" then return pop()
-  else error("LuaMoon VM: invalid opcode "..tostring(op)) end
+  else error("LuaMoon VM: invalid opcode "..tostring(op),0) end
  end
 end
 return run()
