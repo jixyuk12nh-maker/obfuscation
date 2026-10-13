@@ -1,6 +1,7 @@
 import { compileLuaSubset } from "./compiler.js";
 
-const MAX_SOURCE_LENGTH = 200_000;
+const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 55 * 1024 * 1024;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -32,15 +33,15 @@ export default {
       }
 
       const declaredLength = Number(request.headers.get("content-length") || 0);
-      if (declaredLength > MAX_SOURCE_LENGTH * 4) {
-        return json({ error: "Request too large." }, 413);
+      if (declaredLength > MAX_REQUEST_BYTES) {
+        return json({ error: "Request too large. Maximum request size is 55 MiB." }, 413);
       }
 
       let data;
       try {
         const raw = await request.text();
-        if (raw.length > MAX_SOURCE_LENGTH * 4) {
-          return json({ error: "Request too large." }, 413);
+        if (new TextEncoder().encode(raw).byteLength > MAX_REQUEST_BYTES) {
+          return json({ error: "Request too large. Maximum request size is 55 MiB." }, 413);
         }
         data = JSON.parse(raw || "{}");
       } catch {
@@ -50,8 +51,10 @@ export default {
       if (typeof data.source !== "string" || !data.source.trim()) {
         return json({ error: "Enter Lua source code first." }, 400);
       }
-      if (data.source.length > MAX_SOURCE_LENGTH) {
-        return json({ error: "Source limit is 200,000 characters." }, 413);
+
+      const sourceBytes = new TextEncoder().encode(data.source).byteLength;
+      if (sourceBytes > MAX_SOURCE_BYTES) {
+        return json({ error: "Source limit is 50 MiB." }, 413);
       }
 
       try {
