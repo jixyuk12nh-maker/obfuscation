@@ -1,3 +1,5 @@
+const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
+
 const KEYWORDS = new Set(["local", "return", "if", "then", "else", "end", "while", "do", "true", "false", "nil", "and", "or", "not"]);
 
 function lex(source) {
@@ -323,11 +325,14 @@ end
 return run()
 end)()
 `;
-
 }
 
 export function compileLuaSubset(source) {
-  if (source.length > 1_000_000) throw new Error("Input too large (limit 1 MB).");
+  if (typeof source !== "string") throw new Error("Source must be a string.");
+  const byteLength = new TextEncoder().encode(source).byteLength;
+  if (byteLength > MAX_SOURCE_BYTES) {
+    throw new Error(`Input too large (limit 50MB, got ${(byteLength / (1024 * 1024)).toFixed(2)}MB).`);
+  }
   const ast = new Parser(lex(source)).parse();
   const program = compileAst(ast);
   return emitLua(program);
