@@ -1,3 +1,6 @@
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+let isCompiling = false;
+
 const sourceEl = document.querySelector("#source");
 const outputEl = document.querySelector("#output");
 const compileBtn = document.querySelector("#compile");
@@ -6,24 +9,94 @@ const downloadBtn = document.querySelector("#download");
 const statusEl = document.querySelector("#status");
 const sourceCount = document.querySelector("#sourceCount");
 const outputCount = document.querySelector("#outputCount");
+const fileInput = document.querySelector("#file");
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
   statusEl.className = kind;
 }
+
 function updateCounts() {
-  sourceCount.textContent = `${sourceEl.value.length.toLocaleString()} characters`;
-  outputCount.textContent = outputEl.value ? `${outputEl.value.length.toLocaleString()} characters` : "No output yet";
+  const byteSize = new Blob([sourceEl.value]).size;
+  const sizeText =
+    byteSize >= 1024 * 1024
+      ? `${(byteSize / (1024 * 1024)).toFixed(2)} MB`
+      : `${byteSize.toLocaleString()} bytes`;
+  sourceCount.textContent = `${sourceEl.value.length.toLocaleString()} characters (${sizeText})`;
+
+  if (outputEl.value) {
+    const outSize = new Blob([outputEl.value]).size;
+    const outSizeText =
+      outSize >= 1024 * 1024
+        ? `${(outSize / (1024 * 1024)).toFixed(2)} MB`
+        : `${outSize.toLocaleString()} bytes`;
+    outputCount.textContent = `${outputEl.value.length.toLocaleString()} characters (${outSizeText})`;
+  } else {
+    outputCount.textContent = "No output yet";
+  }
 }
-sourceEl.addEventListener("input", updateCounts);
+
+function checkSourceSize() {
+  const byteSize = new Blob([sourceEl.value]).size;
+
+  if (byteSize > MAX_FILE_SIZE) {
+    setStatus(
+      `파일이 너무 큽니다 (최대 50MB, 현재 ${(byteSize / (1024 * 1024)).toFixed(2)}MB)`,
+      "error"
+    );
+    compileBtn.disabled = true;
+    return false;
+  }
+
+  if (!isCompiling) {
+    compileBtn.disabled = false;
+  }
+  return true;
+}
+
+sourceEl.addEventListener("input", () => {
+  updateCounts();
+  checkSourceSize();
+});
+
+if (fileInput) {
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    if (file.size > MAX_FILE_SIZE) {
+      setStatus(
+        `파일이 너무 큽니다 (최대 50MB, 현재 ${(file.size / (1024 * 1024)).toFixed(2)}MB)`,
+        "error"
+      );
+      fileInput.value = "";
+      return;
+    }
+
+    try {
+      sourceEl.value = await file.text();
+      updateCounts();
+      checkSourceSize();
+      setStatus(`Loaded ${file.name}`, "success");
+    } catch {
+      setStatus("파일을 읽을 수 없습니다", "error");
+    } finally {
+      fileInput.value = "";
+    }
+  });
+}
 
 document.querySelector("#loadExample").addEventListener("click", () => {
   sourceEl.value = `local functionName = "LuaMoon"\nlocal amount = 3\nif amount >= 3 then\n    print(functionName .. " VM ready")\nelse\n    warn("not ready")\nend`;
   updateCounts();
+  checkSourceSize();
   setStatus("Example loaded");
 });
 
 compileBtn.addEventListener("click", async () => {
+  if (!checkSourceSize()) return;
+
+  isCompiling = true;
   compileBtn.disabled = true;
   compileBtn.textContent = "Compiling…";
   setStatus("Compiling");
@@ -47,8 +120,9 @@ compileBtn.addEventListener("click", async () => {
     downloadBtn.disabled = true;
     updateCounts();
   } finally {
-    compileBtn.disabled = false;
+    isCompiling = false;
     compileBtn.innerHTML = 'Compile to VM <span aria-hidden="true">→</span>';
+    checkSourceSize();
   }
 });
 
@@ -72,4 +146,5 @@ downloadBtn.addEventListener("click", () => {
   a.click();
   URL.revokeObjectURL(url);
 });
+
 updateCounts();
