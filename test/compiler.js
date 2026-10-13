@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { compileLuaSubset } from "../src/compiler.js";
 
-test("handles the supported example and produces the protected wrapper", () => {
+test("compiles the documented supported example", () => {
   const source = [
     'local name = "LuaMoon"',
     "local count = 2",
@@ -12,17 +12,16 @@ test("handles the supported example and produces the protected wrapper", () => {
     '  warn("not ready")',
     "end"
   ].join("\n");
-  const output = compileLuaSubset(source);
-  assert.match(output, /Luamoon Obfuscator v1\.0/);
-  assert.match(output, /op=="CONCAT"/);
-  assert.match(output, /op=="JMPF"/);
+  const output = compileLuaSubset(source, { seed: 1234 });
+  assert.match(output, /Luamoon Obfuscator v2\.0/);
+  assert.match(output, /local _KW=/);
+  assert.match(output, /local _BC=/);
 });
 
-test("preserves numbers and escapes string constants in generated Lua", () => {
-  const output = compileLuaSubset('local n = -12.5\nprint("hello", n)');
-  assert.match(output, /12\.5/);
-  assert.match(output, /op=="NEG"/);
-  assert.match(output, /"hello"/);
+test("supports numeric and escaped string constants", () => {
+  const output = compileLuaSubset('local n = -12.5\nprint("hello\\nworld", n)', { seed: 1 });
+  assert.match(output, /local _CT=/);
+  assert.match(output, /local _KW=\{/);
 });
 
 test("reports unsupported syntax instead of silently compiling it", () => {
