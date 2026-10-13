@@ -1,57 +1,126 @@
+
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>LuaMoon</title>
+  <meta name="theme-color" content="#0b0a10">
+  <meta name="description" content="LuaMoon — a focused workspace for Lua scripts.">
+  <title>LuaMoon — VM Obfuscator</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
-      <div class="brand">
-        <div class="moon" aria-hidden="true">◔</div>
-        <div><strong>LuaMoon</strong><span>VM Obfuscator</span></div>
-      </div>
-      <span class="version">MVP · v0.1</span>
+      <a class="brand" href="/" aria-label="LuaMoon home">
+        <span class="moon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M20.1 15.1A8.7 8.7 0 0 1 8.9 3.9 8.8 8.8 0 1 0 20.1 15.1Z"/>
+          </svg>
+        </span>
+        <span class="brand-copy">
+          <strong>LuaMoon</strong>
+          <span>VM Obfuscator</span>
+        </span>
+      </a>
+      <span class="version"><span class="live-dot"></span>MVP · v0.1</span>
     </header>
 
-    <section class="hero">
-      <p class="eyebrow">LUA 5.1 · LUAU SUBSET</p>
-      <h1>Protect your script.<br><span>Keep control.</span></h1>
-      <p class="intro">Compile a supported subset of Lua into custom bytecode and a VM wrapper. Source is processed locally by this server and is not sent to a third-party API.</p>
+    <section class="hero" aria-labelledby="page-title">
+      <p class="eyebrow">LUA 5.1 <span>·</span> LUAU SUBSET</p>
+      <h1 id="page-title">Protect your script.<br><span>Keep control.</span></h1>
+      <p class="intro">A focused workspace for your Lua source. Load a file or paste your code below to get started.</p>
     </section>
 
-    <section class="workspace">
-      <div class="pane">
-        <div class="pane-head"><label for="source">Source code</label><button id="loadExample" class="subtle">Load example</button></div>
-        <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off">local name = "LuaMoon"
-local count = 2
-if count > 1 then
-    print(name .. " VM ready")
-else
-    warn("not ready")
-end</textarea>
-        <div class="pane-foot"><span id="sourceCount">0 characters</span><span>Max 1 MB</span></div>
+    <section class="workspace" aria-label="Lua script workspace">
+      <div class="pane source-pane">
+        <div class="pane-head">
+          <div class="pane-title">
+            <span class="pane-icon source-icon" aria-hidden="true">&lt;/&gt;</span>
+            <label for="source">Source code</label>
+          </div>
+          <div class="pane-tools">
+            <button id="loadExample" class="subtle" type="button">Load example</button>
+            <input id="fileInput" class="visually-hidden" type="file" accept=".lua,.txt,text/plain" aria-label="Choose a Lua or text file">
+            <button id="uploadFile" class="subtle upload-button" type="button" aria-controls="fileInput">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/>
+                <path d="M5 13.5v4A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-4"/>
+              </svg>
+              Upload file
+            </button>
+          </div>
+        </div>
+
+        <div class="file-info" id="fileInfo" hidden>
+          <span class="file-mark" aria-hidden="true">LUA</span>
+          <span class="file-name" id="fileName"></span>
+          <span class="file-size" id="fileSize"></span>
+          <button id="removeFile" class="remove-file" type="button" aria-label="Remove loaded file">×</button>
+        </div>
+
+        <div class="editor-wrap" id="sourceDropzone">
+          <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Lua source code" placeholder="Paste your Lua source here, or use Upload file…"></textarea>
+          <div id="dropHint" class="drop-hint" aria-hidden="true" hidden>
+            <span>Drop a .lua or .txt file here</span>
+          </div>
+        </div>
+
+        <div class="pane-foot">
+          <span id="sourceCount">0 characters</span>
+          <span class="size-limit">Maximum file size <strong>50 MB</strong></span>
+        </div>
       </div>
+
       <div class="actions">
-        <button id="compile" class="primary">Obfuscate <span aria-hidden="true">→</span></button>
+        <button id="compile" class="primary" type="button">Obfuscate <span aria-hidden="true">→</span></button>
         <p>Unsupported syntax will show an error.</p>
       </div>
+
       <div class="pane output-pane">
-        <div class="pane-head"><label for="output">Generated Lua</label><div class="output-actions"><button id="copy" class="subtle" disabled>Copy</button><button id="download" class="subtle" disabled>Save .lua</button></div></div>
-        <textarea id="output" spellcheck="false" readonly placeholder="Your generated VM wrapper will appear here..."></textarea>
-        <div class="pane-foot"><span id="outputCount">No output yet</span><span id="status" role="status">Ready</span></div>
+        <div class="pane-head">
+          <div class="pane-title">
+            <span class="pane-icon output-icon" aria-hidden="true">✳</span>
+            <label for="output">Generated Lua</label>
+          </div>
+          <div class="output-actions">
+            <button id="copy" class="subtle" type="button" disabled>Copy</button>
+            <button id="download" class="subtle" type="button" disabled>Save .lua</button>
+          </div>
+        </div>
+
+        <div class="editor-wrap output-wrap">
+          <textarea id="output" spellcheck="false" readonly placeholder="Your generated VM wrapper will appear here…" aria-label="Generated Lua output"></textarea>
+          <div id="outputEmpty" class="output-empty" aria-hidden="true">
+            <span class="output-orbit">✳</span>
+            <span>Output will appear here</span>
+          </div>
+        </div>
+
+        <div class="pane-foot">
+          <span id="outputCount">No output yet</span>
+          <span id="status" class="status" role="status" aria-live="polite">
+            <span class="status-dot"></span>Ready
+          </span>
+        </div>
       </div>
     </section>
 
-    <section class="notice">
-      <strong>Know the limits</strong>
-      <p>This is an experimental compiler for a small shared Lua/Luau subset, not a full Lua parser or a Luraph replacement. Tables, functions, loops other than while, indexing, Luau types, and many language features are not supported yet. Obfuscation is not unbreakable encryption.</p>
+    <section class="notice" aria-label="Prototype limitations">
+      <span class="notice-icon" aria-hidden="true">i</span>
+      <div>
+        <strong>Know the limits</strong>
+        <p>This is an experimental compiler for a limited Lua/Luau subset. Unsupported syntax may fail to compile. Generated scripts should be tested in your target runtime. Obfuscation is not unbreakable encryption.</p>
+      </div>
     </section>
-    <footer>LuaMoon · Independent experimental project</footer>
+
+    <footer>
+      <span>LuaMoon · Independent experimental project</span>
+      <span>Source code is sent to the server only when you choose to compile.</span>
+    </footer>
   </main>
-  <script src="/app.js"></script>
 </body>
 </html>
