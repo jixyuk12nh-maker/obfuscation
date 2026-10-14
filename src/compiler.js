@@ -752,6 +752,180 @@ return _chunk()(_DATA.BC,_DATA.CT,_DATA.FUNCS,_DATA.MA,_DATA.MB,{},nil,{}, {})
 end)()
 `;}
 
+function longBracketOpen(source, start) {
+  if (source[start] !== "[") return null;
+  let i = start + 1;
+  while (source[i] === "=") i++;
+  if (source[i] !== "[") return null;
+  return { equals: i - start - 1, contentStart: i + 1 };
+}
+
+function decodeLuaStringBytes(raw, kind) {
+  if (kind === "long") {
+    const open = longBracketOpen(raw, 0);
+    if (!open) throw new Error("Invalid long-bracket string.");
+    const close = "]" + "=".repeat(open.equals) + "]";
+    let value = raw.slice(open.contentStart, raw.length - close.length).replace(/\r\n?/g, "\n");
+    if (value.startsWith("\n")) value = value.slice(1);
+    return Array.from(new TextEncoder().encode(value));
+  }
+  const bytes = [];
+  const pushText = value => bytes.push(...new TextEncoder().encode(value));
+  for (let i = 1; i < raw.length - 1; i++) {
+    let c = raw[i];
+    if (c !== "\\") { pushText(c); continue; }
+    if (++i >= raw.length - 1) throw new Error("Unfinished escape in string literal.");
+    c = raw[i];
+    const simple = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, "\"": 34, "'": 39 };
+    if (Object.hasOwn(simple, c)) { bytes.push(simple[c]); continue; }
+    if (c === "\n") { bytes.push(10); continue; }
+    if (c === "\r") { if (raw[i + 1] === "\n") i++; bytes.push(10); continue; }
+    if (c === "z") { while (i + 1 < raw.length - 1 && /\s/.test(raw[i + 1])) i++; continue; }
+    if (c === "x" && /^[0-9a-fA-F]{2}$/.test(raw.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(raw.slice(i + 1, i + 3), 16)); i += 2; continue;
+    }
+    if (c === "u" && raw[i + 1] === "{") {
+      const end = raw.indexOf("}", i + 2);
+      if (end < 0) throw new Error("Invalid Unicode escape in string literal.");
+      const cp = parseInt(raw.slice(i + 2, end), 16);
+      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) throw new Error("Invalid Unicode escape in string literal.");
+      pushText(String.fromCodePoint(cp)); i = end; continue;
+    }
+    if (/[0-9]/.test(c)) {
+      let digits = c;
+      while (digits.length < 3 && /[0-9]/.test(raw[i + 1] || "")) digits += raw[++i];
+      const n = Number(digits);
+      if (n > 255) throw new Error("Decimal escape exceeds 255.");
+      bytes.push(n); continue;
+    }
+    pushText(c);
+  }
+  return bytes;
+}
+
+function luaStringExpression(bytes, rng) {
+  if (!bytes.length) return '""';
+  const chunks = [];
+  let i = 0;
+  while (i < bytes.length) {
+    const size = 1 + Math.floor(rng() * 8);
+    const raw = bytes.slice(i, i + size).map(byte => `\\${String(byte).padStart(3, "0")}`).join("");
+    chunks.push(`"${raw}"`);
+    i += size;
+  }
+  return chunks.length === 1 ? chunks[0] : `(${chunks.join(" .. ")})`;
+}
+
+function hasLuauTypeSyntax(source) {
+  return /\bexport\s+type\s+[A-Za-z_]|\btype\s+[A-Za-z_][\w]*\s*=|\btypeof\s*\(|::|\b(?:local\s+)?function\s+[\w.:]+\s*\([^)]*:[^)]*\)|\bfunction\s*\([^)]*:[^)]*\)|\blocal\s+[A-Za-z_]\w*\s*:\s*[A-Za-z_{(]/.test(source);
+}
+
+function isLuauTypeStringLiteral(source, start) {
+  const lineStart = Math.max(source.lastIndexOf("\n", start - 1), source.lastIndexOf(";", start - 1)) + 1;
+  const prefix = source.slice(lineStart, start);
+  // String literal types in aliases, variable annotations, parameter types,
+  // and return types must remain literal syntax instead of becoming expressions.
+  if (/^\s*(?:export\s+)?type\s+[A-Za-z_]\w*\s*=/.test(prefix)) return true;
+  if (/^\s*(?:local\s+)?[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*:\s*[^=]*$/.test(prefix)) return true;
+  if (/\bfunction\b[^\n]*\([^)]*:\s*[^=]*$/.test(prefix)) return true;
+  if (/\bfunction\b[^\n]*\)\s*:\s*[^=]*$/.test(prefix)) return true;
+
+  // Multiline type aliases are conservatively kept as source syntax. This is
+  // a compatibility guard; it avoids turning a type literal into a value expr.
+  const before = source.slice(0, start);
+  const typeMatches = [...before.matchAll(/(?:^|\n)\s*(?:export\s+)?type\s+[A-Za-z_]\w*\s*=/g)];
+  const lastTypeMatch = typeMatches.at(-1);
+  if (lastTypeMatch) {
+    const tail = before.slice(lastTypeMatch.index + lastTypeMatch[0].length);
+    const lines = tail.split(/\r?\n/);
+    const interrupted = lines.slice(1).some(line =>
+      /^\s*(?:local\b|function\b|return\b|if\b|for\b|while\b|repeat\b|do\b|print\s*\(|warn\s*\(|[A-Za-z_]\w*\s*=)/.test(line)
+    );
+    const currentLine = source.slice(Math.max(source.lastIndexOf("\n", start - 1) + 1, 0), source.indexOf("\n", start) < 0 ? source.length : source.indexOf("\n", start));
+    if (!interrupted && /^\s*["']/.test(currentLine)) return true;
+  }
+  return false;
+}
+
+function universalLexicalObfuscate(source, rng, options = {}) {
+  const language = options.language === "luau" ? "luau" : "lua";
+  const replacements = [];
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === "'" || c === '"') {
+      const start = i++;
+      let closed = false;
+      while (i < source.length) {
+        if (source[i] === "\\") { i += 2; continue; }
+        if (source[i] === c) { i++; closed = true; break; }
+        i++;
+      }
+      if (!closed) throw new Error(`Unclosed string at character ${start + 1}.`);
+      const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
+      if (!preserveTypeLiteral) {
+        const raw = source.slice(start, i);
+        replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "quoted"), rng) });
+      }
+      continue;
+    }
+    if (c === "[") {
+      const open = longBracketOpen(source, i);
+      if (open) {
+        const start = i;
+        const close = "]" + "=".repeat(open.equals) + "]";
+        const end = source.indexOf(close, open.contentStart);
+        if (end < 0) throw new Error(`Unclosed long-bracket string at character ${start + 1}.`);
+        i = end + close.length;
+        const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
+        if (!preserveTypeLiteral) {
+          const raw = source.slice(start, i);
+          replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "long"), rng) });
+        }
+        continue;
+      }
+    }
+    if (c === "`") {
+      i++;
+      let closed = false;
+      while (i < source.length) {
+        if (source[i] === "\\") { i += 2; continue; }
+        if (source[i] === "`") { i++; closed = true; break; }
+        i++;
+      }
+      if (!closed) throw new Error("Unclosed Luau interpolated string.");
+      continue;
+    }
+    if (source.startsWith("--", i)) {
+      const start = i;
+      const open = longBracketOpen(source, i + 2);
+      if (open) {
+        const close = "]" + "=".repeat(open.equals) + "]";
+        const end = source.indexOf(close, open.contentStart);
+        if (end < 0) throw new Error(`Unclosed long comment at character ${start + 1}.`);
+        i = end + close.length;
+        const comment = source.slice(start, i);
+        if (/^--!/.test(comment)) replacements.push({ start, end: i, text: comment });
+        else replacements.push({ start, end: i, text: comment.replace(/[^\r\n]/g, " ") });
+      } else {
+        const end = source.indexOf("\n", i);
+        i = end < 0 ? source.length : end;
+        const comment = source.slice(start, i);
+        if (/^--!/.test(comment)) replacements.push({ start, end: i, text: comment });
+        else replacements.push({ start, end: i, text: comment.replace(/[^\r\n]/g, " ") });
+      }
+      continue;
+    }
+    i++;
+  }
+  let output = source;
+  for (let r = replacements.length - 1; r >= 0; r--) {
+    const item = replacements[r];
+    output = output.slice(0, item.start) + item.text + output.slice(item.end);
+  }
+  return output;
+}
+
 export function compileLuaSubset(source, options = {}) {
   if (typeof source !== "string") throw new Error("Source must be a string.");
   const byteLength = new TextEncoder().encode(source).byteLength;
@@ -759,7 +933,13 @@ export function compileLuaSubset(source, options = {}) {
   if (byteLength > maxBytes) {
     throw new Error(`Input too large (limit 50MB, got ${(byteLength / (1024 * 1024)).toFixed(2)}MB).`);
   }
-  const rng = Number.isInteger(options.seed) ? mulberry32(options.seed) : secureRandom;
-  const ast = new Parser(lex(source)).parse();
-  return emitLua(compileAst(ast, rng));
+  const language = options.language === "luau" ? "luau" : "lua";
+  const rng = Number.isInteger(options.seed) ? mulberry32(options.seed ^ (language === "luau" ? 0x4c554155 : 0x4c554120)) : secureRandom;
+
+  // Intentionally do not compile input through the prototype VM. A lexical
+  // transformer leaves the target language's grammar and runtime semantics in
+  // place, so constructs outside the old VM subset (method calls, varargs,
+  // multiple returns/assignments, goto, Lua 5.3 operators, Luau types, etc.)
+  // are not rejected or rewritten by a partial parser.
+  return universalLexicalObfuscate(source, rng, { language });
 }
