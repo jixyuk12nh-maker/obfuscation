@@ -1,4 +1,4 @@
-const KEYWORDS = new Set(["local", "return", "if", "then", "else", "end", "while", "do", "true", "false", "nil", "and", "or", "not"]);
+const KEYWORDS = new Set(["local", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not"]);
 
 function lex(source) {
   const tokens = [];
@@ -52,7 +52,7 @@ function lex(source) {
       push("symbol", op, start);
       continue;
     }
-    if ("+-*/%^#=<>(),;".includes(c)) {
+    if ("+-*/%^#=<>(),;{}[]:.".includes(c)) {
       i++;
       push("symbol", c, start);
       continue;
@@ -109,18 +109,41 @@ class Parser {
     }
     if (this.is("return")) {
       this.take();
-      if (["end", "else", "<eof>", ";"].includes(this.peek().value)) return { type: "return", value: null };
+      if (["end", "else", "elseif", "until", "<eof>", ";"].includes(this.peek().value)) return { type: "return", value: null };
       return { type: "return", value: this.expression() };
     }
     if (this.is("if")) {
       this.take();
-      const test = this.expression();
+      const branches = [];
+      let test = this.expression();
       this.expect("then");
-      const yes = this.block(new Set(["else", "end"]));
+      branches.push({ test, body: this.block(new Set(["elseif", "else", "end"])) });
+      while (this.is("elseif")) {
+        this.take();
+        test = this.expression();
+        this.expect("then");
+        branches.push({ test, body: this.block(new Set(["elseif", "else", "end"])) });
+      }
       let no = [];
       if (this.is("else")) { this.take(); no = this.block(new Set(["end"])); }
       this.expect("end");
-      return { type: "if", test, yes, no };
+      return { type: "if", branches, no };
+    }
+    if (this.is("repeat")) {
+      this.take();
+      const body = this.block(new Set(["until"]));
+      this.expect("until");
+      return { type: "repeat", body, test: this.expression() };
+    }
+    if (this.is("do")) {
+      this.take();
+      const body = this.block(new Set(["end"]));
+      this.expect("end");
+      return { type: "do", body };
+    }
+    if (this.is("break")) {
+      this.take();
+      return { type: "break" };
     }
     if (this.is("while")) {
       this.take();
@@ -131,25 +154,16 @@ class Parser {
       return { type: "while", test, body };
     }
     if (this.peek().type === "identifier") {
-      const name = this.take().value;
+      const target = this.suffixedPrimary();
       if (this.is("=")) {
         this.take();
-        return { type: "assign", name, local: false, value: this.expression() };
+        const value = this.expression();
+        if (target.type === "variable") return { type: "assign", name: target.name, local: false, value };
+        if (target.type === "index") return { type: "setindex", target: target.target, key: target.key, value };
+        throw new Error(`Invalid assignment target at character ${this.peek().pos + 1}.`);
       }
-      if (this.is("(")) {
-        this.take();
-        const args = [];
-        if (!this.is(")")) {
-          do {
-            args.push(this.expression());
-            if (!this.is(",")) break;
-            this.take();
-          } while (!this.is(")"));
-        }
-        this.expect(")");
-        return { type: "call", name, args };
-      }
-      throw new Error(`Only assignment or a simple named call is supported after '${name}'.`);
+      if (target.type === "call") return { type: "callExpr", expression: target };
+      throw new Error(`Expected assignment or function call at character ${this.peek().pos + 1}.`);
     }
     throw new Error(`Unsupported statement '${this.peek().value}' at character ${this.peek().pos + 1}.`);
   }
@@ -171,32 +185,89 @@ class Parser {
       this.take();
       return { type: "unary", op: t.value, value: this.expression(7) };
     }
+    let node;
     if (t.value === "(") {
       this.take();
-      const value = this.expression();
+      node = this.expression();
       this.expect(")");
-      return value;
-    }
-    if (t.type === "number" || t.type === "string") {
+    } else if (t.type === "number" || t.type === "string") {
       this.take();
-      return { type: "constant", value: t.value };
-    }
-    if (t.value === "true" || t.value === "false" || t.value === "nil") {
+      node = { type: "constant", value: t.value };
+    } else if (["true", "false", "nil"].includes(t.value)) {
       this.take();
-      return { type: "constant", value: t.value === "nil" ? null : t.value === "true" };
+      node = { type: "constant", value: t.value === "nil" ? null : t.value === "true" };
+    } else if (t.type === "identifier") {
+      node = { type: "variable", name: this.take().value };
+    } else if (t.value === "{") {
+      node = this.tableConstructor();
+    } else {
+      throw new Error(`Expected expression at character ${t.pos + 1}, got '${t.value}'.`);
     }
-    if (t.type === "identifier") {
-      this.take();
-      return { type: "variable", name: t.value };
-    }
-    throw new Error(`Expected expression at character ${t.pos + 1}, got '${t.value}'.`);
+    return this.suffixes(node);
   }
+  suffixedPrimary() {
+    const t = this.peek();
+    if (t.type !== "identifier") throw new Error(`Expected identifier at character ${t.pos + 1}.`);
+    return this.suffixes({ type: "variable", name: this.take().value });
+  }
+  suffixes(node) {
+    while (true) {
+      if (this.is("[")) {
+        this.take();
+        const key = this.expression();
+        this.expect("]");
+        node = { type: "index", target: node, key };
+      } else if (this.is(".")) {
+        this.take();
+        const name = this.identifier();
+        node = { type: "index", target: node, key: { type: "constant", value: name } };
+      } else if (this.is("(")) {
+        this.take();
+        const args = [];
+        if (!this.is(")")) {
+          do {
+            args.push(this.expression());
+            if (!this.is(",")) break;
+            this.take();
+          } while (!this.is(")"));
+        }
+        this.expect(")");
+        node = { type: "call", callee: node, args };
+      } else break;
+    }
+    return node;
+  }
+  tableConstructor() {
+    this.expect("{");
+    const fields = [];
+    let arrayIndex = 1;
+    while (!this.is("}")) {
+      if (this.is("[")) {
+        this.take();
+        const key = this.expression();
+        this.expect("]");
+        this.expect("=");
+        fields.push({ key, value: this.expression() });
+      } else if (this.peek().type === "identifier" && this.t[this.i + 1]?.value === "=") {
+        const key = { type: "constant", value: this.take().value };
+        this.expect("=");
+        fields.push({ key, value: this.expression() });
+      } else {
+        fields.push({ key: { type: "constant", value: arrayIndex++ }, value: this.expression() });
+      }
+      if (this.is(",") || this.is(";")) this.take();
+      else if (!this.is("}")) throw new Error(`Expected ',' or '}' at character ${this.peek().pos + 1}.`);
+    }
+    this.expect("}");
+    return { type: "table", fields };
+  }
+
 }
 
 const OPCODES = [
   "PUSH", "LOAD", "STORE", "NEG", "NOT", "LEN", "ADD", "SUB", "MUL", "DIV",
   "MOD", "POW", "CONCAT", "EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR",
-  "CALL", "JMP", "JMPF", "RETURN"
+  "CALL", "JMP", "JMPF", "JMPT", "DUP", "POP", "RETURN", "NEWTABLE", "GETTABLE", "SETTABLE"
 ];
 
 function mulberry32(seed) {
@@ -262,18 +333,43 @@ function compileAst(ast, rng) {
     return code.length;
   }
   function patch(index, target) { code[index - 1][1] = target; }
+  const loopBreaks = [];
   function expr(n) {
     switch (n.type) {
       case "constant": emit("PUSH", constant(n.value)); break;
       case "variable": emit("LOAD", constant(n.name)); break;
+      case "index": expr(n.target); expr(n.key); emit("GETTABLE"); break;
+      case "table":
+        emit("NEWTABLE");
+        for (const field of n.fields) {
+          emit("DUP");
+          expr(field.key);
+          expr(field.value);
+          emit("SETTABLE");
+        }
+        break;
+      case "call":
+        expr(n.callee);
+        for (const arg of n.args) expr(arg);
+        emit("CALL", 0, n.args.length);
+        break;
       case "unary":
         expr(n.value);
         emit(n.op === "-" ? "NEG" : n.op === "not" ? "NOT" : "LEN");
         break;
       case "binary":
-        expr(n.left);
-        expr(n.right);
-        emit(({ "+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "^": "POW", "..": "CONCAT", "==": "EQ", "~=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE", "and": "AND", "or": "OR" })[n.op]);
+        if (n.op === "and" || n.op === "or") {
+          expr(n.left);
+          emit("DUP");
+          const jump = emit(n.op === "and" ? "JMPF" : "JMPT", 0);
+          emit("POP");
+          expr(n.right);
+          patch(jump, code.length + 1);
+        } else {
+          expr(n.left);
+          expr(n.right);
+          emit(({ "+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "^": "POW", "..": "CONCAT", "==": "EQ", "~=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE" })[n.op]);
+        }
         break;
       default: throw new Error("Internal compiler error: unknown expression.");
     }
@@ -284,26 +380,59 @@ function compileAst(ast, rng) {
         expr(s.value);
         emit("STORE", constant(s.name), s.local ? 1 : 0);
       } else if (s.type === "call") {
+        expr({ type: "variable", name: s.name });
         for (const arg of s.args) expr(arg);
-        emit("CALL", constant(s.name), s.args.length);
+        emit("CALL", 0, s.args.length);
+        emit("POP");
+      } else if (s.type === "callExpr") {
+        expr(s.expression);
+        emit("POP");
+      } else if (s.type === "setindex") {
+        expr(s.target);
+        expr(s.key);
+        expr(s.value);
+        emit("SETTABLE");
       } else if (s.type === "return") {
         if (s.value) expr(s.value); else emit("PUSH", constant(null));
         emit("RETURN");
       } else if (s.type === "if") {
-        expr(s.test);
-        const jf = emit("JMPF", 0);
-        block(s.yes);
-        const je = emit("JMP", 0);
-        patch(jf, code.length + 1);
+        const exits = [];
+        for (const branch of s.branches) {
+          expr(branch.test);
+          const jf = emit("JMPF", 0);
+          block(branch.body);
+          exits.push(emit("JMP", 0));
+          patch(jf, code.length + 1);
+        }
         block(s.no);
-        patch(je, code.length + 1);
+        for (const jump of exits) patch(jump, code.length + 1);
       } else if (s.type === "while") {
         const start = code.length + 1;
         expr(s.test);
         const jf = emit("JMPF", 0);
+        const breaks = [];
+        loopBreaks.push(breaks);
         block(s.body);
+        loopBreaks.pop();
         emit("JMP", start);
-        patch(jf, code.length + 1);
+        const end = code.length + 1;
+        patch(jf, end);
+        for (const jump of breaks) patch(jump, end);
+      } else if (s.type === "repeat") {
+        const start = code.length + 1;
+        const breaks = [];
+        loopBreaks.push(breaks);
+        block(s.body);
+        loopBreaks.pop();
+        expr(s.test);
+        emit("JMPF", start);
+        const end = code.length + 1;
+        for (const jump of breaks) patch(jump, end);
+      } else if (s.type === "do") {
+        block(s.body);
+      } else if (s.type === "break") {
+        if (!loopBreaks.length) throw new Error("'break' outside loop.");
+        loopBreaks[loopBreaks.length - 1].push(emit("JMP", 0));
       }
     }
   }
@@ -326,17 +455,28 @@ function emitLua(program) {
   const decoder = OPCODES.map((name, i) => `${i === 0 ? "if" : "elseif"} id==${opIds.get(name)} then return ${JSON.stringify(name)}`).join("\n") + "\nend";
 
   const innerVmSource = `local function _vm(BC,CT)
-local S,L,LD,V,pc={},{},{},{},1
-local function pop() local n=#S local v=S[n] S[n]=nil return v end
-local function push(v) S[#S+1]=v end
+local S,L,LD,V,sp,pc={},{},{},{},0,1
+local function pop() if sp<1 then error("LuaMoon VM: stack underflow",0) end local v=S[sp] S[sp]=nil sp=sp-1 return v end
+local function push(v) sp=sp+1 S[sp]=v end
 local function truth(v) return v~=nil and v~=false end
+local function bx(a,b)
+local r,p=0,1
+for _=1,8 do
+local x,y=a%2,b%2
+if x~=y then r=r+p end
+a=math.floor(a/2) b=math.floor(b/2) p=p*2
+end
+return r
+end
 local function ds(bl)
 local rot=bl[1]
 local keys={bl[2],bl[3],bl[4],bl[5]}
 local out={}
 for i=6,#bl do
-local b=bit32.bxor(bl[i],keys[(i-6)%4+1])
-b=bit32.band(bit32.bor(bit32.lshift(b,8-rot),bit32.rshift(b,rot)),255)
+local b=bl[i]
+local m=2^rot
+b=math.floor(b/m)+(b%m)*2^(8-rot)
+b=bx(b,keys[(i-6)%4+1])
 out[#out+1]=string.char(b)
 end
 return table.concat(out)
@@ -381,16 +521,20 @@ elseif o=="LT" then local y,x=pop(),pop() push(x<y)
 elseif o=="LE" then local y,x=pop(),pop() push(x<=y)
 elseif o=="GT" then local y,x=pop(),pop() push(x>y)
 elseif o=="GE" then local y,x=pop(),pop() push(x>=y)
-elseif o=="AND" then local y,x=pop(),pop() if truth(x) then push(y) else push(x) end
-elseif o=="OR" then local y,x=pop(),pop() if truth(x) then push(x) else push(y) end
+elseif o=="DUP" then push(S[sp])
+elseif o=="POP" then pop()
+elseif o=="NEWTABLE" then push({})
+elseif o=="GETTABLE" then local k,t=pop(),pop() push(t[k])
+elseif o=="SETTABLE" then local v,k,t=pop(),pop(),pop() t[k]=v
 elseif o=="CALL" then
 local args={} for j=b,1,-1 do args[j]=pop() end
-local name=gc(a) local f
-if LD[name] then f=L[name] else f=V[name] if type(f)~="function" then f=_G[name] end end
-if type(f)~="function" then error("LuaMoon VM: function not found: "..tostring(name),0) end
-f((table.unpack or unpack)(args))
+local f
+if a~=0 then local name=gc(a) if LD[name] then f=L[name] else f=V[name] if type(f)~="function" then f=_G[name] end end else f=pop() end
+if type(f)~="function" then error("LuaMoon VM: function not found",0) end
+push(f((table.unpack or unpack)(args)))
 elseif o=="JMP" then pc=a
 elseif o=="JMPF" then if not truth(pop()) then pc=a end
+elseif o=="JMPT" then if truth(pop()) then pc=a end
 elseif o=="RETURN" then return true,pop()
 end
 return false,nil
@@ -406,18 +550,28 @@ end
 return _vm`;
 
   const encryptedVm = encodeXorRotate(innerVmSource, rng);
-  return `-- This file was protected using Luamoon Obfuscator v2.0 [https://obfuscation.jixyuk12nh.workers.dev/]
-return (function()
+  return `return (function()
 local _KW=${bytesToLuaArray(encryptedVm)}
 local _CT=${constLua}
 local _BC=${codeLua}
+local function _bx(a,b)
+local r,p=0,1
+for _=1,8 do
+local x,y=a%2,b%2
+if x~=y then r=r+p end
+a=math.floor(a/2) b=math.floor(b/2) p=p*2
+end
+return r
+end
 local function _dk(bl)
 local rot=bl[1]
 local keys={bl[2],bl[3],bl[4],bl[5]}
 local out={}
 for i=6,#bl do
-local b=bit32.bxor(bl[i],keys[(i-6)%4+1])
-b=bit32.band(bit32.bor(bit32.lshift(b,8-rot),bit32.rshift(b,rot)),255)
+local b=bl[i]
+local m=2^rot
+b=math.floor(b/m)+(b%m)*2^(8-rot)
+b=_bx(b,keys[(i-6)%4+1])
 out[#out+1]=string.char(b)
 end
 return table.concat(out)
