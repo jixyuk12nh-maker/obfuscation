@@ -1,4 +1,4 @@
-const KEYWORDS = new Set(["local", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not"]);
+const KEYWORDS = new Set(["local", "function", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not"]);
 
 function lex(source) {
   const tokens = [];
@@ -103,9 +103,19 @@ class Parser {
   statement() {
     if (this.is("local")) {
       this.take();
+      if (this.is("function")) {
+        this.take();
+        const name = this.identifier();
+        return { type: "localFunction", name, func: this.functionBody() };
+      }
       const name = this.identifier();
       this.expect("=");
       return { type: "assign", name, local: true, value: this.expression() };
+    }
+    if (this.is("function")) {
+      this.take();
+      const name = this.identifier();
+      return { type: "functionDecl", name, func: this.functionBody() };
     }
     if (this.is("return")) {
       this.take();
@@ -167,6 +177,21 @@ class Parser {
     }
     throw new Error(`Unsupported statement '${this.peek().value}' at character ${this.peek().pos + 1}.`);
   }
+  functionBody() {
+    this.expect("(");
+    const params = [];
+    if (!this.is(")")) {
+      do {
+        params.push(this.identifier());
+        if (!this.is(",")) break;
+        this.take();
+      } while (!this.is(")"));
+    }
+    this.expect(")");
+    const body = this.block(new Set(["end"]));
+    this.expect("end");
+    return { type: "function", params, body };
+  }
   expression(min = 1) {
     let left = this.prefix();
     while (true) {
@@ -198,6 +223,9 @@ class Parser {
       node = { type: "constant", value: t.value === "nil" ? null : t.value === "true" };
     } else if (t.type === "identifier") {
       node = { type: "variable", name: this.take().value };
+    } else if (t.value === "function") {
+      this.take();
+      node = this.functionBody();
     } else if (t.value === "{") {
       node = this.tableConstructor();
     } else {
@@ -267,7 +295,7 @@ class Parser {
 const OPCODES = [
   "PUSH", "LOAD", "STORE", "NEG", "NOT", "LEN", "ADD", "SUB", "MUL", "DIV",
   "MOD", "POW", "CONCAT", "EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR",
-  "CALL", "JMP", "JMPF", "JMPT", "DUP", "POP", "RETURN", "NEWTABLE", "GETTABLE", "SETTABLE"
+  "CALL", "JMP", "JMPF", "JMPT", "DUP", "POP", "RETURN", "NEWTABLE", "GETTABLE", "SETTABLE", "NOP", "CLOSURE"
 ];
 
 function mulberry32(seed) {
@@ -315,7 +343,7 @@ function bytesToLuaArray(bytes) {
   return bytes.length ? `{${Array.from(bytes).join(",")}}` : "{}";
 }
 
-function compileAst(ast, rng) {
+function compileAst(ast, rng, functions = [], params = []) {
   const code = [];
   const constants = [];
   const constantMap = new Map();
@@ -328,6 +356,14 @@ function compileAst(ast, rng) {
     }
     return constantMap.get(key);
   }
+  const paramConstants = params.map(name => constant(name));
+  function registerFunction(fn) {
+    const id = functions.length + 1;
+    functions.push(null);
+    const child = compileAst(fn.body, rng, functions, fn.params);
+    functions[id - 1] = child;
+    return id;
+  }
   function emit(op, a = 0, b = 0) {
     code.push([op, a, b]);
     return code.length;
@@ -337,6 +373,7 @@ function compileAst(ast, rng) {
   function expr(n) {
     switch (n.type) {
       case "constant": emit("PUSH", constant(n.value)); break;
+      case "function": emit("CLOSURE", registerFunction(n)); break;
       case "variable": emit("LOAD", constant(n.name)); break;
       case "index": expr(n.target); expr(n.key); emit("GETTABLE"); break;
       case "table":
@@ -379,6 +416,9 @@ function compileAst(ast, rng) {
       if (s.type === "assign") {
         expr(s.value);
         emit("STORE", constant(s.name), s.local ? 1 : 0);
+      } else if (s.type === "localFunction" || s.type === "functionDecl") {
+        expr(s.func);
+        emit("STORE", constant(s.name), s.type === "localFunction" ? 1 : 0);
       } else if (s.type === "call") {
         expr({ type: "variable", name: s.name });
         for (const arg of s.args) expr(arg);
@@ -439,23 +479,74 @@ function compileAst(ast, rng) {
   block(ast);
   emit("PUSH", constant(null));
   emit("RETURN");
-  return { code, constants, rng };
+  return { code, constants, functions, params: paramConstants, rng };
+}
+
+function secureRandom() {
+  if (globalThis.crypto?.getRandomValues) {
+    const value = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(value);
+    return value[0] / 4294967296;
+  }
+  throw new Error("Secure randomness is unavailable; provide an explicit seed only for testing.");
+}
+
+function padControlFlow(code, rng) {
+  const jumpOps = new Set(["JMP", "JMPF", "JMPT"]);
+  const targetMap = new Map();
+  let expandedLength = 0;
+  const padding = code.map(() => 1 + Math.floor(rng() * 3));
+  for (let i = 0; i < code.length; i++) {
+    expandedLength += padding[i];
+    targetMap.set(i + 1, expandedLength + 1);
+    expandedLength += 1;
+  }
+  targetMap.set(code.length + 1, expandedLength + 1);
+  const expanded = [];
+  for (let i = 0; i < code.length; i++) {
+    for (let j = 0; j < padding[i]; j++) expanded.push(["NOP", 0, 0]);
+    const row = [...code[i]];
+    if (jumpOps.has(row[0])) {
+      const mapped = targetMap.get(row[1]);
+      if (mapped === undefined) throw new Error("Invalid jump target during control-flow encoding.");
+      row[1] = mapped;
+    }
+    expanded.push(row);
+  }
+  return expanded;
 }
 
 function emitLua(program) {
   const rng = program.rng;
   const shuffledIds = shuffleArray(Array.from({ length: 256 }, (_, i) => i), rng);
   const opIds = new Map(OPCODES.map((op, i) => [op, shuffledIds[i]]));
-  const encodedConstants = program.constants.map(value => encodeConstant(value, rng));
-  const constLua = `{${encodedConstants.map(entry => {
-    if (entry.tag === "z" || entry.tag === "t" || entry.tag === "f") return `{${JSON.stringify(entry.tag)}}`;
-    return `{${JSON.stringify(entry.tag)},${bytesToLuaArray(entry.bytes)}}`;
-  }).join(",")}}`;
-  const codeLua = `{${program.code.map(row => `{${opIds.get(row[0])},${row[1]},${row[2]}}`).join(",")}}`;
+  const MOD32 = 4294967296;
+  const encodedOperand = (value, base, index, stride) =>
+    (value + ((base + index * stride) % MOD32)) % MOD32;
+  function encodeProgramData(prog) {
+    const operandMaskA = 1 + Math.floor(rng() * 0x7ffffffe);
+    const operandMaskB = 1 + Math.floor(rng() * 0x7ffffffe);
+    const encodedConstants = prog.constants.map(value => encodeConstant(value, rng));
+    const constLua = `{${encodedConstants.map(entry => {
+      if (entry.tag === "z" || entry.tag === "t" || entry.tag === "f") return `{${JSON.stringify(entry.tag)}}`;
+      return `{${JSON.stringify(entry.tag)},${bytesToLuaArray(entry.bytes)}}`;
+    }).join(",")}}`;
+    const code = padControlFlow(prog.code, rng);
+    const codeLua = `{${code.map((row, i) => {
+      const index = i + 1;
+      return `{${opIds.get(row[0])},${encodedOperand(row[1], operandMaskA, index, 65599)},${encodedOperand(row[2], operandMaskB, index, 31337)}}`;
+    }).join(",")}}`;
+    return { BC: codeLua, CT: constLua, MA: operandMaskA, MB: operandMaskB, P: `{${(prog.params || []).join(",")}}` };
+  }
+  const encodedPrograms = [program, ...program.functions].map(encodeProgramData);
+  const root = encodedPrograms[0];
+  const funcsLua = `{${encodedPrograms.slice(1).map(p => `{BC=${p.BC},CT=${p.CT},MA=${p.MA},MB=${p.MB},P=${p.P}}`).join(",")}}`;
   const decoder = OPCODES.map((name, i) => `${i === 0 ? "if" : "elseif"} id==${opIds.get(name)} then return ${JSON.stringify(name)}`).join("\n") + "\nend";
 
-  const innerVmSource = `local function _vm(BC,CT)
-local S,L,LD,V,sp,pc={},{},{},{},0,1
+  const innerVmSource = `local _TAG={}
+local function _vm(BC,CT,FUNCS,_MA,_MB,V,P,ARGS,PARAMS)
+local _MOD=4294967296
+local S,L,LD,sp,pc={},{},{},0,1
 local function pop() if sp<1 then error("LuaMoon VM: stack underflow",0) end local v=S[sp] S[sp]=nil sp=sp-1 return v end
 local function push(v) sp=sp+1 S[sp]=v end
 local function truth(v) return v~=nil and v~=false end
@@ -490,21 +581,36 @@ if e[1]=="z" then return nil end
 if e[1]=="t" then return true end
 if e[1]=="f" then return false end
 end
+local function findParent(name, frame)
+while frame do
+if frame.LD[name] then return frame.L,name end
+frame=frame.P
+end
+return nil,nil
+end
+for i,index in ipairs(PARAMS or {}) do
+local name=gc(index)
+LD[name]=true
+L[name]=(ARGS or {})[i]
+end
 local function op(id)
 ${decoder}
 return nil
 end
-local function step(ins)
+local function step(ins,index)
 local o=op(ins[1])
 if not o then error("LuaMoon VM: invalid opcode",0) end
-local a,b=ins[2],ins[3]
-if o=="PUSH" then push(gc(a))
+local a=(ins[2]-((_MA+index*65599)%_MOD))%_MOD
+local b=(ins[3]-((_MB+index*31337)%_MOD))%_MOD
+if o=="NOP" then
+elseif o=="CLOSURE" then push({[_TAG]=true,id=a,env={L=L,LD=LD,P=P}})
+elseif o=="PUSH" then push(gc(a))
 elseif o=="LOAD" then
 local name=gc(a)
-if LD[name] then push(L[name]) else local v=V[name] if v==nil then v=_G[name] end push(v) end
+if LD[name] then push(L[name]) else local pl,pn=findParent(name,P) if pl then push(pl[pn]) else local v=V[name] if v==nil then v=_G[name] end push(v) end end
 elseif o=="STORE" then
 local name=gc(a) local v=pop()
-if b==1 then LD[name]=true L[name]=v else V[name]=v _G[name]=v end
+if b==1 then LD[name]=true L[name]=v elseif LD[name] then L[name]=v else local pl,pn=findParent(name,P) if pl then pl[pn]=v else V[name]=v end end
 elseif o=="NEG" then push(-(tonumber(pop()) or 0))
 elseif o=="NOT" then push(not truth(pop()))
 elseif o=="LEN" then push(#pop())
@@ -530,8 +636,14 @@ elseif o=="CALL" then
 local args={} for j=b,1,-1 do args[j]=pop() end
 local f
 if a~=0 then local name=gc(a) if LD[name] then f=L[name] else f=V[name] if type(f)~="function" then f=_G[name] end end else f=pop() end
+if type(f)=="table" and f[_TAG] then
+local proto=FUNCS[f.id]
+if not proto then error("LuaMoon VM: invalid closure",0) end
+push(_vm(proto.BC,proto.CT,FUNCS,proto.MA,proto.MB,V,f.env,args,proto.P))
+else
 if type(f)~="function" then error("LuaMoon VM: function not found",0) end
 push(f((table.unpack or unpack)(args)))
+end
 elseif o=="JMP" then pc=a
 elseif o=="JMPF" then if not truth(pop()) then pc=a end
 elseif o=="JMPT" then if truth(pop()) then pc=a end
@@ -540,10 +652,11 @@ end
 return false,nil
 end
 while true do
-local ins=BC[pc]
+local index=pc
+local ins=BC[index]
 if not ins then return nil end
-pc=pc+1
-local done,value=step(ins)
+pc=index+1
+local done,value=step(ins,index)
 if done then return value end
 end
 end
@@ -552,8 +665,9 @@ return _vm`;
   const encryptedVm = encodeXorRotate(innerVmSource, rng);
   return `return (function()
 local _KW=${bytesToLuaArray(encryptedVm)}
-local _CT=${constLua}
-local _BC=${codeLua}
+local _CT=${root.CT}
+local _BC=${root.BC}
+local _FUNCS=${funcsLua}
 local function _bx(a,b)
 local r,p=0,1
 for _=1,8 do
@@ -581,7 +695,7 @@ local _loader=loadstring or load
 if type(_loader)~="function" then error("LuaMoon VM: dynamic code loading is unavailable",0) end
 local _chunk,_err=_loader(_src)
 if not _chunk then error(_err or "LuaMoon VM: failed to initialize",0) end
-return _chunk()(_BC,_CT)
+return _chunk()(_BC,_CT,_FUNCS,${root.MA},${root.MB},{},nil,{}, {})
 end)()
 `;
 }
@@ -593,8 +707,7 @@ export function compileLuaSubset(source, options = {}) {
   if (byteLength > maxBytes) {
     throw new Error(`Input too large (limit 50MB, got ${(byteLength / (1024 * 1024)).toFixed(2)}MB).`);
   }
-  const seed = Number.isInteger(options.seed) ? options.seed : ((Math.random() * 0x7fffffff) | 0);
-  const rng = mulberry32(seed);
+  const rng = Number.isInteger(options.seed) ? mulberry32(options.seed) : secureRandom;
   const ast = new Parser(lex(source)).parse();
   return emitLua(compileAst(ast, rng));
 }

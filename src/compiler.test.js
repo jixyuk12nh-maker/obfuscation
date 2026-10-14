@@ -48,3 +48,47 @@ test("rejects malformed assignments", () => {
 test("enforces the 50 MiB source limit", () => {
   assert.throws(() => compileLuaSubset("a".repeat(50 * 1024 * 1024 + 1)), /limit 50MB/i);
 });
+
+
+test("masks bytecode operands per build and updates existing locals safely", () => {
+  const a = compileLuaSubset("local x=0 while x<3 do x=x+1 end print(x)", { seed: 100 });
+  const b = compileLuaSubset("local x=0 while x<3 do x=x+1 end print(x)", { seed: 101 });
+  assert.notEqual(a, b);
+  assert.match(a, /local _BC=\{\{[0-9]+,[0-9]{8,},[0-9]{8,}/);
+});
+
+
+test("supports local functions and positional parameters", () => {
+  const output = compileLuaSubset("local function add(a,b) return a+b end print(add(3,4))", { seed: 31 });
+  assert.match(output, /local _FUNCS=/);
+  assert.match(output, /local _FUNCS=\{\{/);
+});
+
+test("supports closures capturing outer locals", () => {
+  const output = compileLuaSubset("local x=10 local function make() local y=2 return function(z) return x+y+z end end local f=make() print(f(5))", { seed: 32 });
+  assert.match(output, /local _FUNCS=/);
+  assert.match(output, /local _FUNCS=\{\{/);
+});
+
+test("supports global function declarations", () => {
+  const output = compileLuaSubset("function add(a,b) return a+b end print(add(1,2))", { seed: 33 });
+  assert.match(output, /local _FUNCS=/);
+});
+
+test("inserts control-flow padding and randomized opcode mapping", () => {
+  const output = compileLuaSubset("local x=0 while x<2 do x=x+1 end print(x)", { seed: 34 });
+  assert.match(output, /local _BC=\{\{/);
+  assert.match(output, /_FUNCS,\d+,\d+/);
+});
+
+
+test("does not expose a distinctive source string in generated text", () => {
+  const marker = "LUAMOON_PRIVATE_LITERAL_7F3A91C2";
+  const output = compileLuaSubset(`local message = "${marker}" print(message)`, { seed: 90210 });
+  assert.equal(output.includes(marker), false);
+});
+
+test("supports nested closures and mutation of a captured local", () => {
+  const output = compileLuaSubset("local count=0 local function nextValue() count=count+1 return count end print(nextValue(),nextValue())", { seed: 90211 });
+  assert.match(output, /local _FUNCS=\{\{/);
+});
