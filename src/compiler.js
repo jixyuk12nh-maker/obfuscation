@@ -6,19 +6,41 @@ import {
   longBracketOpen,
   decodeLuaStringBytes,
   hasLuauTypeSyntax,
+  maskStringsAndComments,
   secureRandom
 } from "./shared.js";
 
 export { compileLuaVm } from "./vm.js";
 
 const KEYWORDS = new Set(["local", "function", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not", "for"]);
+const NUMBER_RE = /0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?\d+)?|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
+const NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/y;
+// How far back the Luau string classifier looks for the start of a line. Keeps
+// the per-string cost constant even for minified single-line sources.
+const LINE_LOOKBEHIND = 2000;
 
 function luaStringExpression(bytes, rng, decoderName, alphabet) {
   const key = 1 + Math.floor(rng() * 255);
   const stride = 1 + Math.floor(rng() * 255);
   const cipher = bytes.map((byte, index) => byte ^ ((key + index * stride) & 0xff));
   const payload = base64Encode(cipher, alphabet);
-  return `${decoderName}(${JSON.stringify(payload)},${key},${stride})`;
+  // Parenthesised so the call stays a single expression even where a string
+  // literal is allowed without parentheses, e.g. `print "hi"` -> `print (dec(...))`.
+  return `(${decoderName}(${JSON.stringify(payload)},${key},${stride}))`;
+}
+
+// Applies non-overlapping replacements given in ascending `start` order.
+// Builds the output in one pass; repeated String#slice on the full source
+// would make large inputs quadratic.
+function applyReplacements(source, replacements) {
+  const parts = [];
+  let last = 0;
+  for (const r of replacements) {
+    parts.push(source.slice(last, r.start), r.text);
+    last = r.end;
+  }
+  parts.push(source.slice(last));
+  return parts.join("");
 }
 
 function makeDecoderName(source, rng) {
@@ -57,31 +79,85 @@ function preludeOffset(source) {
   return pos;
 }
 
-function isLuauTypeStringLiteral(source, start) {
-  const lineStart = Math.max(source.lastIndexOf("\n", start - 1), source.lastIndexOf(";", start - 1)) + 1;
-  const prefix = source.slice(lineStart, start);
-  // String literal types in aliases, variable annotations, parameter types,
-  // and return types must remain literal syntax instead of becoming expressions.
+// Positions used to classify Luau string literals in one linear pass:
+// the end offset of every multiline `type X =` alias, and the start offset of
+// every line that begins a statement (which ends an alias body).
+function luauTypeContext(source) {
+  const aliasEnds = [];
+  for (const m of source.matchAll(/(?:^|\n)[ \t]*(?:export[ \t]+)?type[ \t]+[A-Za-z_]\w*[ \t]*=/g)) {
+    aliasEnds.push(m.index + m[0].length);
+  }
+  const statementStarts = [];
+  for (const m of source.matchAll(/^[ \t]*(?:local\b|function\b|return\b|if\b|for\b|while\b|repeat\b|do\b|print[ \t]*\(|warn[ \t]*\(|[A-Za-z_]\w*[ \t]*=)/gm)) {
+    statementStarts.push(m.index);
+  }
+  return { aliasEnds, statementStarts };
+}
+
+// Largest element <= x in an ascending array, or -1.
+function lastAtMost(sorted, x) {
+  let lo = 0, hi = sorted.length - 1, found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] <= x) { found = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return found < 0 ? -1 : sorted[found];
+}
+
+// Smallest element > x in an ascending array, or Infinity.
+function firstAbove(sorted, x) {
+  let lo = 0, hi = sorted.length - 1, found = Infinity;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] > x) { found = sorted[mid]; hi = mid - 1; } else lo = mid + 1;
+  }
+  return found;
+}
+
+function lineStartBefore(source, pos) {
+  const floor = Math.max(0, pos - LINE_LOOKBEHIND);
+  let p = pos;
+  while (p > floor && source[p - 1] !== "\n") p--;
+  return p;
+}
+
+// Decides whether a Luau string literal is part of a type (alias, annotation,
+// function parameter or return type) and must stay literal source text.
+// Value strings, including method-call arguments such as `obj:Method("x")`,
+// are not type literals and are encoded.
+// True when the prefix ends inside a call's argument list, e.g. `obj:Method(`
+// or `f(a, `. Function parameter lists (`function f(`) are not calls.
+function insideCallArguments(prefix) {
+  const open = [];
+  for (let k = 0; k < prefix.length; k++) {
+    if (prefix[k] === "(") open.push(k);
+    else if (prefix[k] === ")") open.pop();
+  }
+  return open.some(k => {
+    const before = prefix.slice(0, k);
+    return /[\w\])]\s*$/.test(before) && !/\bfunction\s*[\w.:]*\s*$/.test(before);
+  });
+}
+
+function isLuauTypeStringLiteral(source, start, context) {
+  const windowStart = Math.max(0, start - LINE_LOOKBEHIND);
+  const segment = source.slice(windowStart, start);
+  const prefix = segment.slice(Math.max(segment.lastIndexOf("\n"), segment.lastIndexOf(";")) + 1);
+  // A string inside a call, such as `game:GetService("Players")`, is a value
+  // even though the text before it looks like `name:` (a method call).
+  if (insideCallArguments(prefix)) return false;
   if (/^\s*(?:export\s+)?type\s+[A-Za-z_]\w*\s*=/.test(prefix)) return true;
   if (/^\s*(?:local\s+)?[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*:\s*[^=]*$/.test(prefix)) return true;
   if (/\bfunction\b[^\n]*\([^)]*:\s*[^=]*$/.test(prefix)) return true;
   if (/\bfunction\b[^\n]*\)\s*:\s*[^=]*$/.test(prefix)) return true;
 
-  // Multiline type aliases are conservatively kept as source syntax. This is
-  // a compatibility guard; it avoids turning a type literal into a value expr.
-  const before = source.slice(0, start);
-  const typeMatches = [...before.matchAll(/(?:^|\n)\s*(?:export\s+)?type\s+[A-Za-z_]\w*\s*=/g)];
-  const lastTypeMatch = typeMatches.at(-1);
-  if (lastTypeMatch) {
-    const tail = before.slice(lastTypeMatch.index + lastTypeMatch[0].length);
-    const lines = tail.split(/\r?\n/);
-    const interrupted = lines.slice(1).some(line =>
-      /^\s*(?:local\b|function\b|return\b|if\b|for\b|while\b|repeat\b|do\b|print\s*\(|warn\s*\(|[A-Za-z_]\w*\s*=)/.test(line)
-    );
-    const currentLine = source.slice(Math.max(source.lastIndexOf("\n", start - 1) + 1, 0), source.indexOf("\n", start) < 0 ? source.length : source.indexOf("\n", start));
-    if (!interrupted && /^\s*["']/.test(currentLine)) return true;
-  }
-  return false;
+  // A string that starts a line continuing a multiline `type X =` alias stays
+  // literal, unless a statement line intervened.
+  const aliasEnd = lastAtMost(context.aliasEnds, start);
+  if (aliasEnd < 0) return false;
+  if (firstAbove(context.statementStarts, aliasEnd) <= start) return false;
+  // Continuation lines of a union or intersection may begin with `|` or `&`.
+  return /^\s*[|&]?\s*$/.test(source.slice(lineStartBefore(source, start), start));
 }
 
 function identifierTokens(source) {
@@ -131,8 +207,18 @@ function identifierTokens(source) {
       continue;
     }
     const start = i;
+    // Numbers are consumed whole, so that `0x10` or `1e5` never leaves a
+    // `x10` / `e5` identifier behind that a local could be renamed into.
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(source[i + 1] || ""))) {
+      NUMBER_RE.lastIndex = i;
+      const m = NUMBER_RE.exec(source)[0];
+      i += m.length;
+      out.push({ value: m, start, end: i, type: "number" });
+      continue;
+    }
     if (/[A-Za-z_]/.test(c)) {
-      const m = source.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/)[0];
+      NAME_RE.lastIndex = i;
+      const m = NAME_RE.exec(source)[0];
       i += m.length;
       out.push({ value: m, start, end: i, type: KEYWORDS.has(m) ? "keyword" : "identifier" });
       continue;
@@ -143,6 +229,25 @@ function identifierTokens(source) {
     out.push({ value: c, start, end: i, type: "symbol" });
   }
   return out;
+}
+
+// For every token: the number of open block frames (function/do/repeat/if
+// bodies) and the innermost open bracket or block frame around it.
+function analyzeFrames(tokens) {
+  const frames = [];
+  const depth = new Array(tokens.length);
+  const enclosing = new Array(tokens.length);
+  let blocks = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const v = tokens[i].value;
+    depth[i] = blocks;
+    enclosing[i] = frames.length ? frames[frames.length - 1] : null;
+    if (v === "(" || v === "[" || v === "{") frames.push(v);
+    else if (v === ")" || v === "]" || v === "}") frames.pop();
+    else if (v === "function" || v === "do" || v === "repeat" || v === "then") { frames.push("block"); blocks++; }
+    else if (v === "elseif" || v === "end" || v === "until") { frames.pop(); blocks--; }
+  }
+  return { depth, enclosing };
 }
 
 function makeIdentifier(rng, used) {
@@ -157,36 +262,45 @@ function makeIdentifier(rng, used) {
   throw new Error("Unable to generate a unique local identifier.");
 }
 
+// True when the identifier at token j names a field, method, label or goto
+// target rather than a variable, so it must not follow a local's rename.
+function isNonVariableUse(tokens, j, enclosingFrame) {
+  const prev = tokens[j - 1]?.value;
+  const next = tokens[j + 1]?.value;
+  if (prev === "." || prev === ":" || prev === "::" || prev === "goto") return true;
+  if (next === "::") return true;
+  // `name = value` inside a table constructor is a field key. Outside one it is
+  // an assignment to the local itself and must be renamed with it.
+  if (next === "=" && enclosingFrame === "{" && (prev === "{" || prev === "," || prev === ";")) return true;
+  return false;
+}
+
 // Conservative top-level local renaming. If the source contains constructs that
 // make scope analysis ambiguous for this lexical pass, renaming is skipped rather
 // than risking a semantic change. String encoding still runs in that case.
 function renameSafeTopLevelLocals(source, rng, language) {
-  if (source.includes("`") || (language === "luau" && hasLuauTypeSyntax(source))) return source;
+  if (source.includes("`") || (language === "luau" && hasLuauTypeSyntax(maskStringsAndComments(source)))) return source;
   const tokens = identifierTokens(source);
   if (!tokens || !tokens.length) return source;
-  const depths = [];
-  const stack = [];
-  let pendingIf = 0;
-  for (let i = 0; i < tokens.length; i++) {
-    const v = tokens[i].value;
-    if (v === "end" || v === "until") {
-      if (stack.length) stack.pop();
-    } else if (v === "elseif") {
-      if (stack.length && stack.at(-1) === "if") stack.pop();
-      pendingIf++;
-    } else if (v === "else") {
-      if (stack.length && stack.at(-1) === "if") stack.pop();
-      stack.push("if");
+  const { depth, enclosing } = analyzeFrames(tokens);
+
+  const occurrences = new Map();   // name -> token indexes of every identifier use
+  const firstUse = new Map();      // name -> index of its first identifier use
+  const localDecls = new Map();    // name -> token indexes of `local <name>`
+  for (let j = 0; j < tokens.length; j++) {
+    const t = tokens[j];
+    if (t.type === "identifier") {
+      if (!occurrences.has(t.value)) { occurrences.set(t.value, []); firstUse.set(t.value, j); }
+      occurrences.get(t.value).push(j);
     }
-    depths[i] = stack.length;
-    if (v === "function") stack.push("function");
-    else if (v === "then") stack.push("if");
-    else if (v === "do") stack.push("do");
-    else if (v === "repeat") stack.push("repeat");
-    if (v === "elseif") pendingIf = 1;
-    if (pendingIf && v === "then") pendingIf = 0;
+    if (t.value === "local" && tokens[j + 1]?.type === "identifier") {
+      const name = tokens[j + 1].value;
+      if (!localDecls.has(name)) localDecls.set(name, []);
+      localDecls.get(name).push(j);
+    }
   }
-  const used = new Set(tokens.filter(t => t.type === "identifier").map(t => t.value));
+
+  const used = new Set(occurrences.keys());
   const candidates = [];
   const declarations = new Map();
   const functionParams = new Set();
@@ -206,7 +320,7 @@ function renameSafeTopLevelLocals(source, rng, language) {
         if (tokens[j].type === "identifier" && (j === i + 1 || tokens[j - 1]?.value === ",")) loopVars.add(tokens[j].value);
       }
     }
-    if (tokens[i].value !== "local" || depths[i] !== 0) continue;
+    if (tokens[i].value !== "local" || depth[i] !== 0) continue;
     let nameIndex = i + 1;
     let isFunction = false;
     if (tokens[nameIndex]?.value === "function") { isFunction = true; nameIndex++; }
@@ -215,43 +329,33 @@ function renameSafeTopLevelLocals(source, rng, language) {
     // Only initialized, single-name locals are handled by this conservative pass.
     if (!isFunction && tokens[nameIndex + 1]?.value !== "=") continue;
     const name = nameToken.value;
-    const entries = declarations.get(name) || [];
-    entries.push({ index: nameIndex, isFunction });
-    declarations.set(name, entries);
-    candidates.push({ name, index: nameIndex, isFunction });
+    declarations.set(name, [...(declarations.get(name) || []), nameIndex]);
+    candidates.push({ name, index: nameIndex });
   }
+
   const replacements = [];
-  for (const candidate of candidates) {
-    const { name, index, isFunction } = candidate;
+  for (const { name, index } of candidates) {
     if ((declarations.get(name) || []).length !== 1 || functionParams.has(name) || loopVars.has(name)) continue;
-    // Any earlier same-name token could be a global/reference whose meaning must not change.
-    if (tokens.slice(0, index).some(t => t.type === "identifier" && t.value === name)) continue;
-    // Avoid ambiguous type declarations and redeclarations in nested scopes.
-    let unsafe = false;
-    for (let j = index + 1; j < tokens.length; j++) {
-      if (tokens[j].value === "local" && tokens[j + 1]?.value === name) { unsafe = true; break; }
-    }
-    if (unsafe) continue;
+    // An earlier use of the same name could be a global whose meaning must not change.
+    if (firstUse.get(name) < index) continue;
+    // Avoid redeclarations of the same name later on.
+    if ((localDecls.get(name) || []).some(j => j > index)) continue;
     const renamed = makeIdentifier(rng, used);
-    for (let j = index; j < tokens.length; j++) {
-      const token = tokens[j];
-      if (token.type !== "identifier" || token.value !== name) continue;
-      if (j !== index && (tokens[j - 1]?.value === "." || tokens[j - 1]?.value === ":" || tokens[j - 1]?.value === "::" || tokens[j + 1]?.value === "=" || tokens[j + 1]?.value === "::")) continue;
-      replacements.push({ start: token.start, end: token.end, text: renamed });
+    for (const j of occurrences.get(name)) {
+      if (j < index) continue;
+      if (j !== index && isNonVariableUse(tokens, j, enclosing[j])) continue;
+      replacements.push({ start: tokens[j].start, end: tokens[j].end, text: renamed });
     }
   }
+  if (!replacements.length) return source;
   replacements.sort((a, b) => a.start - b.start);
-  let output = source;
-  for (let i = replacements.length - 1; i >= 0; i--) {
-    const r = replacements[i];
-    output = output.slice(0, r.start) + r.text + output.slice(r.end);
-  }
-  return output;
+  return applyReplacements(source, replacements);
 }
 
 function universalLexicalObfuscate(source, rng, options = {}) {
   const language = options.language === "luau" ? "luau" : "lua";
   if (options.renameLocals === true) source = renameSafeTopLevelLocals(source, rng, language);
+  const typeContext = language === "luau" ? luauTypeContext(source) : null;
   const replacements = [];
   const alphabetChars = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,-./:;<>?@[]^_`{|}~");
   shuffleArray(alphabetChars, rng);
@@ -270,7 +374,7 @@ function universalLexicalObfuscate(source, rng, options = {}) {
         i++;
       }
       if (!closed) throw new Error(`Unclosed string at character ${start + 1}.`);
-      const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
+      const preserveTypeLiteral = typeContext !== null && isLuauTypeStringLiteral(source, start, typeContext);
       if (!preserveTypeLiteral) {
         const raw = source.slice(start, i);
         replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "quoted"), rng, decoderName, alphabet) });
@@ -286,7 +390,7 @@ function universalLexicalObfuscate(source, rng, options = {}) {
         const end = source.indexOf(close, open.contentStart);
         if (end < 0) throw new Error(`Unclosed long-bracket string at character ${start + 1}.`);
         i = end + close.length;
-        const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
+        const preserveTypeLiteral = typeContext !== null && isLuauTypeStringLiteral(source, start, typeContext);
         if (!preserveTypeLiteral) {
           const raw = source.slice(start, i);
           replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "long"), rng, decoderName, alphabet) });
@@ -328,11 +432,7 @@ function universalLexicalObfuscate(source, rng, options = {}) {
     }
     i++;
   }
-  let output = source;
-  for (let r = replacements.length - 1; r >= 0; r--) {
-    const item = replacements[r];
-    output = output.slice(0, item.start) + item.text + output.slice(item.end);
-  }
+  let output = applyReplacements(source, replacements);
   if (encodedStringCount > 0) {
     const originalOffset = preludeOffset(source);
     let adjustedOffset = originalOffset;

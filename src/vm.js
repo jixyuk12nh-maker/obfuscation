@@ -19,6 +19,7 @@ import {
   longBracketOpen,
   decodeLuaStringBytes,
   hasLuauTypeSyntax,
+  maskStringsAndComments,
   secureRandom
 } from "./shared.js";
 
@@ -188,7 +189,8 @@ class Parser {
     this.t = tokens;
     this.i = 0;
     this.luau = luau;
-    this.varargs = [false];
+    // The main chunk is a vararg function, as in Lua, so `...` is valid at top level.
+    this.varargs = [true];
   }
 
   peek(k = 0) { return this.t[Math.min(this.i + k, this.t.length - 1)]; }
@@ -1178,6 +1180,7 @@ local _MOD=4294967296
 local F=DATA.F
 local OPN=${opnLiteral}
 local unpack=table.unpack or unpack
+local mtype=math.type
 local function pack(...) return {n=select("#",...),...} end
 local function truth(v) return v~=nil and v~=false end
 local function tobit(v) return math.floor(v)%_MOD end
@@ -1327,7 +1330,7 @@ elseif o=="SETU" then UPV[a].v=pop()
 elseif o=="SETG" then G[gc(pr,a)]=pop()
 elseif o=="DIV" then local y=pop() local x=pop() push(x/y)
 elseif o=="POW" then local y=pop() local x=pop() push(x^y)
-elseif o=="IDIV" then local y=pop() local x=pop() push(math.floor(x/y))
+elseif o=="IDIV" then local y=pop() local x=pop() local q=math.floor(x/y) if mtype and (mtype(x)=="float" or mtype(y)=="float") then q=q+0.0 end push(q)
 elseif o=="NE" then local y=pop() local x=pop() push(x~=y)
 elseif o=="NEG" then push(-pop())
 elseif o=="LEN" then push(#pop())
@@ -1477,7 +1480,9 @@ export function compileLuaVm(source, options = {}) {
   const byteLength = new TextEncoder().encode(source).byteLength;
   if (byteLength > 50 * 1024 * 1024) throw new Error("Input too large (limit 50MB).");
   const luau = options.language === "luau";
-  if (luau && hasLuauTypeSyntax(source)) {
+  // Checked on the masked source so text inside strings or comments (for example
+  // "a::b") does not look like Luau type syntax.
+  if (luau && hasLuauTypeSyntax(maskStringsAndComments(source))) {
     throw new Error("VM mode does not support Luau type declarations yet. Use Compatibility mode for typed Luau.");
   }
   const rng = Number.isInteger(options.seed)

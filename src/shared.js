@@ -117,6 +117,60 @@ export function decodeLuaStringBytes(raw, kind) {
   return bytes;
 }
 
+// Returns the source with the contents of string literals, long strings and
+// comments replaced by spaces (line breaks kept). Pattern checks run on the
+// result cannot fire on text that is only inside a literal or a comment.
+export function maskStringsAndComments(source) {
+  const parts = [];
+  let last = 0;
+  const blank = (start, end) => {
+    parts.push(source.slice(last, start), source.slice(start, end).replace(/[^\r\n]/g, " "));
+    last = end;
+  };
+  const n = source.length;
+  let i = 0;
+  while (i < n) {
+    const c = source[i];
+    if (c === "-" && source[i + 1] === "-") {
+      const start = i;
+      const open = longBracketOpen(source, i + 2);
+      let end;
+      if (open) {
+        const close = "]" + "=".repeat(open.equals) + "]";
+        const found = source.indexOf(close, open.contentStart);
+        end = found < 0 ? n : found + close.length;
+      } else {
+        const found = source.indexOf("\n", i);
+        end = found < 0 ? n : found;
+      }
+      blank(start, end);
+      i = end;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      const start = i++;
+      while (i < n && source[i] !== c) i += source[i] === "\\" ? 2 : 1;
+      i = Math.min(i + 1, n);
+      blank(start, i);
+      continue;
+    }
+    if (c === "[") {
+      const open = longBracketOpen(source, i);
+      if (open) {
+        const start = i;
+        const close = "]" + "=".repeat(open.equals) + "]";
+        const found = source.indexOf(close, open.contentStart);
+        i = found < 0 ? n : found + close.length;
+        blank(start, i);
+        continue;
+      }
+    }
+    i++;
+  }
+  parts.push(source.slice(last));
+  return parts.join("");
+}
+
 export function hasLuauTypeSyntax(source) {
   return /\bexport\s+type\s+[A-Za-z_]|\btype\s+[A-Za-z_][\w]*\s*=|\btypeof\s*\(|::|\b(?:local\s+)?function\s+[\w.:]+\s*\([^)]*:[^)]*\)|\bfunction\s*\([^)]*:[^)]*\)|\blocal\s+[A-Za-z_]\w*\s*:\s*[A-Za-z_{(]/.test(source);
 }
