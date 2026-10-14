@@ -343,6 +343,29 @@ function bytesToLuaArray(bytes) {
   return bytes.length ? `{${Array.from(bytes).join(",")}}` : "{}";
 }
 
+function base64Encode(bytes, alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const hasB = i + 1 < bytes.length;
+    const hasC = i + 2 < bytes.length;
+    const b = hasB ? bytes[i + 1] : 0;
+    const c = hasC ? bytes[i + 2] : 0;
+    out += alphabet[a >> 2];
+    out += alphabet[((a & 3) << 4) | (b >> 4)];
+    out += hasB ? alphabet[((b & 15) << 2) | (c >> 6)] : "=";
+    out += hasC ? alphabet[c & 63] : "=";
+  }
+  return out;
+}
+
+function encodeMaskedText(value, rng, alphabet) {
+  const key = 1 + Math.floor(rng() * 255);
+  const bytes = new TextEncoder().encode(value);
+  for (let i = 0; i < bytes.length; i++) bytes[i] ^= key;
+  return { text: base64Encode(bytes, alphabet), key };
+}
+
 function compileAst(ast, rng, functions = [], params = []) {
   const code = [];
   const constants = [];
@@ -518,6 +541,9 @@ function padControlFlow(code, rng) {
 
 function emitLua(program) {
   const rng = program.rng;
+  const alphabetChars = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,-./:;<>?@[]^_`{|}~");
+  shuffleArray(alphabetChars, rng);
+  const packedAlphabet = alphabetChars.slice(0, 64).join("");
   const shuffledIds = shuffleArray(Array.from({ length: 256 }, (_, i) => i), rng);
   const opIds = new Map(OPCODES.map((op, i) => [op, shuffledIds[i]]));
   const MOD32 = 4294967296;
@@ -663,11 +689,30 @@ end
 return _vm`;
 
   const encryptedVm = encodeXorRotate(innerVmSource, rng);
+  const payloadSource = `return {CT=${root.CT},BC=${root.BC},FUNCS=${funcsLua},MA=${root.MA},MB=${root.MB}}`;
+  const payload = encodeMaskedText(payloadSource, rng, packedAlphabet);
+  const encodedVm = base64Encode(encryptedVm, packedAlphabet);
   return `return (function()
-local _KW=${bytesToLuaArray(encryptedVm)}
-local _CT=${root.CT}
-local _BC=${root.BC}
-local _FUNCS=${funcsLua}
+local _A=${JSON.stringify(packedAlphabet)}
+local _KW=${JSON.stringify(encodedVm)}
+local _D=${JSON.stringify(payload.text)}
+local _Q=${payload.key}
+local function _u(s)
+local M={}
+for i=1,#_A do M[string.sub(_A,i,i)]=i-1 end
+local O={} local V=0 local B=0
+for i=1,#s do
+local c=string.sub(s,i,i)
+if c~="=" then
+local n=M[c]
+if n then
+V=V*64+n B=B+6
+if B>=8 then B=B-8 local q=math.floor(V/2^B)%256 O[#O+1]=q V=V%2^B end
+end
+end
+end
+return O
+end
 local function _bx(a,b)
 local r,p=0,1
 for _=1,8 do
@@ -690,15 +735,22 @@ out[#out+1]=string.char(b)
 end
 return table.concat(out)
 end
-local _src=_dk(_KW)
+local function _un(s,k)
+local b=_u(s) local o={}
+for i=1,#b do o[i]=string.char(_bx(b[i],k)) end
+return table.concat(o)
+end
 local _loader=loadstring or load
 if type(_loader)~="function" then error("LuaMoon VM: dynamic code loading is unavailable",0) end
+local _dataChunk,_dataErr=_loader(_un(_D,_Q))
+if not _dataChunk then error(_dataErr or "LuaMoon VM: data initialization failed",0) end
+local _DATA=_dataChunk()
+local _src=_dk(_u(_KW))
 local _chunk,_err=_loader(_src)
 if not _chunk then error(_err or "LuaMoon VM: failed to initialize",0) end
-return _chunk()(_BC,_CT,_FUNCS,${root.MA},${root.MB},{},nil,{}, {})
+return _chunk()(_DATA.BC,_DATA.CT,_DATA.FUNCS,_DATA.MA,_DATA.MB,{},nil,{}, {})
 end)()
-`;
-}
+`;}
 
 export function compileLuaSubset(source, options = {}) {
   if (typeof source !== "string") throw new Error("Source must be a string.");
