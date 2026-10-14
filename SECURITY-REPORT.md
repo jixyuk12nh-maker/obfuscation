@@ -7,6 +7,7 @@
 - Per-program operand masks for bytecode operands and jump targets.
 - Random NOP padding and remapping of branch destinations.
 - Encoded constant pool and embedded VM source.
+- Packed bytecode, constants, function metadata, and VM payload into base64-style text blobs, with a per-build XOR mask on the program-data blob, reducing the obvious numeric-table appearance.
 - Function prototypes, positional parameters, single-value returns, and closure environments.
 - Captured-local reads and writes through parent closure frames.
 - Runtime checks for invalid opcodes, missing closures, and stack underflow.
@@ -25,7 +26,7 @@
 
 ## Security limitations
 
-This is still source-level VM obfuscation, not cryptographic secrecy. The decoder and VM are delivered to the same runtime as the protected code and can be extracted. NOP padding and operand masks raise static-analysis effort but are not proof against dynamic tracing or devirtualization. Client-side Roblox scripts can be inspected by a determined user.
+This is still source-level VM obfuscation, not cryptographic secrecy. The string-packed representation is a readability/static-inspection barrier, not encryption that can safely protect secrets. The decoder and VM are delivered to the same runtime as the protected code and can be extracted. NOP padding and operand masks raise static-analysis effort but are not proof against dynamic tracing or devirtualization. Client-side Roblox scripts can be inspected by a determined user.
 
 ## Language limitations
 

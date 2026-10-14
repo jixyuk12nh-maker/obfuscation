@@ -18,13 +18,15 @@ LuaMoon is an experimental Lua-subset source-to-bytecode obfuscator. This projec
 
 - Per-build randomized opcode IDs
 - String and numeric constant encoding with XOR and byte rotation
+- Per-build randomized 64-character printable alphabet for packed payload strings instead of visible giant numeric `_KW`, `_CT`, and `_BC` tables
+- Per-build XOR masking for the packed program-data blob
 - Encoded VM source
 - Per-program arithmetic operand masking for bytecode operands and jump targets
 - Random no-op padding before instructions, with jump targets remapped to preserve control flow
 - Cryptographically sourced randomness for normal builds (`crypto.getRandomValues`); deterministic seeds are accepted for tests only
 - VM stack-underflow and invalid-opcode checks
 
-These are obfuscation layers, not cryptographic secrecy. The decoder, masks, and runtime logic must be present client-side and can be recovered by a determined analyst. No anti-debugging or environment-tampering behavior is included.
+These are obfuscation layers, not cryptographic secrecy. Random-alphabet packed blobs make the generated text look like dense symbol-heavy encoded strings rather than ordinary Base64 or numeric tables, but the runtime decoder and data can still be recovered. The decoder, masks, and runtime logic must be present client-side and can be recovered by a determined analyst. No anti-debugging or environment-tampering behavior is included.
 
 ## Known limitations
 
