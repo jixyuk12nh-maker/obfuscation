@@ -18,6 +18,7 @@ A partial hand-written parser rejects many valid programs (method calls, multipl
 - Ordinary quoted and long-bracket string literals become encoded payload calls; each string gets its own key and rolling mask.
 - A per-build shuffled printable alphabet makes payloads differ across builds.
 - A local runtime decoder uses only standard Lua string/table/math operations, avoiding a dependency on `bit32` and preserving Lua 5.1 compatibility for the decoder itself.
+- Eligible top-level single-name locals are renamed with collision-checked randomized identifiers. The pass is conservative and skips renaming when Luau type syntax, backtick interpolation, shadowing/redeclaration, or ambiguous declaration patterns are detected.
 - Ordinary line and long-bracket comments are blanked while retaining line breaks.
 - `--!` directives are preserved before the injected helper.
 - Source is not wrapped in `loadstring`/`load`; the transformed program remains source code. The decoder only reconstructs individual string values.
@@ -28,7 +29,13 @@ The test suite checks representative Lua/Luau syntax and lexical transformations
 
 ## Limitations
 
-This is a compatibility-first lexical obfuscator, not a complete AST-based obfuscator. It does not currently rename local variables or perform control-flow flattening. It does not claim to validate every grammar production. Always test output in the exact target Lua/Luau runtime, especially for byte encodings and language-version-specific syntax. Backtick interpolated strings are preserved as-is to avoid altering Luau interpolation semantics.
+This is a compatibility-first lexical obfuscator, not a complete AST-based obfuscator. It performs conservative top-level local renaming, but does not perform full scope-aware renaming for all grammar constructs or control-flow flattening. It does not claim to validate every grammar production. Always test output in the exact target Lua/Luau runtime, especially for byte encodings and language-version-specific syntax. Backtick interpolated strings are preserved as-is to avoid altering Luau interpolation semantics.
+
+## Experimental VM engine
+
+The web UI and `POST /api/obfuscate` also support `{ "mode": "vm" }`. This mode parses a deliberately limited Lua subset, compiles it into custom instructions, shuffles opcode IDs, masks operands, inserts control-flow NOP padding, encodes constants, and embeds a VM interpreter. It is a real prototype virtualization path, not the compatibility transform.
+
+Current VM limitations are significant: it does not implement the full Lua grammar or Roblox Luau type system; multiple assignment/returns, varargs, generic/numeric `for`, `continue`, compound assignment, interpolation strings, and many other constructs are not supported. Runtime execution uses `loadstring`/`load` to initialize the embedded VM and encoded data, so the target environment must allow dynamic code loading. Test output in the actual Lua/Luau runtime before using it. Use `mode: "compatibility"` for broad syntax preservation. This prototype is not equivalent to Luraph and should not be marketed as Luraph-grade.
 
 ## Run
 

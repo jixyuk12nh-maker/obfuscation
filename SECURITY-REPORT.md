@@ -7,19 +7,20 @@
 - Encoded each eligible string with a distinct key and rolling XOR mask.
 - Generated a randomized local decoder identifier that avoids names already present in the source.
 - Kept the decoder in the same source chunk and inserted it after leading Luau `--!` directives and a possible shebang.
+- Added conservative randomized renaming for eligible top-level single-name local declarations; property names, method names, and table keys are preserved. Renaming is skipped when known syntax features make this pass ambiguous.
 - Retained lexical comment removal while preserving line breaks and left surrounding Lua/Luau syntax unchanged.
 - Fixed Unicode handling for supplementary-plane characters (for example emoji) so UTF-8 source characters are encoded as their actual UTF-8 bytes.
 
 ## Validation performed
 
-- Node unit suite: 19/19 tests passing.
+- Node unit suite: 21/21 tests passing.
 - Luau CLI runtime smoke test: ordinary strings, escaped strings, long-bracket strings, Unicode emoji, and byte values restored correctly.
 - Mocked Obsidian-style `game:HttpGet()` + `loadstring()` + `Library:CreateWindow({...})` sample ran and printed the expected `Obsidian`, `true`, `true` values.
 - ZIP integrity check performed after packaging.
 
 ## Security limitations
 
-This is a stronger static-inspection barrier than plain decimal escapes, but it is **not Luraph-level protection** and not cryptographic secrecy. The decoder and per-string keys/strides are delivered with the protected source; a determined analyst can reverse the decoder or capture strings at runtime. Local identifiers remain visible, and this update does not add full AST-level variable renaming, control-flow flattening, bytecode virtualization, or anti-tamper logic. Do not store secrets or API keys in client-side scripts.
+This is a stronger static-inspection barrier than plain decimal escapes, but it is **not Luraph-level protection** and not cryptographic secrecy. The decoder and per-string keys/strides are delivered with the protected source; a determined analyst can reverse the decoder or capture strings at runtime. Identifier renaming is conservative and limited; this update does not add complete scope-aware renaming, control-flow flattening, bytecode virtualization, or anti-tamper logic. Do not store secrets or API keys in client-side scripts.
 
 ## Language and compatibility limitations
 
