@@ -2,7 +2,7 @@
 
 > Research update: implementation strategy was checked against the Prometheus obfuscator and the official Luau repository. See [`docs/GITHUB-RESEARCH.md`](docs/GITHUB-RESEARCH.md) for sources and limits.
 
-LuaMoon transforms Lua and Roblox Luau source without compiling it through a limited custom VM. The transformer scans lexical constructs (quoted strings, long-bracket strings/comments, line comments, directives, and Luau backtick strings), then encodes eligible string literals and removes ordinary comments while preserving line breaks and the surrounding source syntax.
+LuaMoon transforms Lua and Roblox Luau source without compiling it through a limited custom VM. The transformer scans lexical constructs (quoted strings, long-bracket strings/comments, line comments, directives, and Luau backtick strings), then protects eligible string literals with a per-build shuffled alphabet plus per-string rolling XOR masks. A small randomized-name decoder restores strings at runtime. Ordinary comments are removed while line breaks and surrounding source syntax are preserved.
 
 ## Why this architecture
 
@@ -15,10 +15,12 @@ A partial hand-written parser rejects many valid programs (method calls, multipl
 
 ## Transformations
 
-- Ordinary quoted and long-bracket string literals are converted to decimal-escaped byte strings, split into randomized chunks when needed.
+- Ordinary quoted and long-bracket string literals become encoded payload calls; each string gets its own key and rolling mask.
+- A per-build shuffled printable alphabet makes payloads differ across builds.
+- A local runtime decoder uses only standard Lua string/table/math operations, avoiding a dependency on `bit32` and preserving Lua 5.1 compatibility for the decoder itself.
 - Ordinary line and long-bracket comments are blanked while retaining line breaks.
-- `--!` directives are preserved.
-- Source is not wrapped in `loadstring`/`load`; the transformed program remains source code.
+- `--!` directives are preserved before the injected helper.
+- Source is not wrapped in `loadstring`/`load`; the transformed program remains source code. The decoder only reconstructs individual string values.
 
 ## Validation status
 
