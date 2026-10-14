@@ -1,43 +1,63 @@
-# LuaMoon VM Prototype
+# LuaMoon VM — Security Update
 
-LuaMoon is an experimental source-to-bytecode obfuscator project for Lua-like scripts. This version emits a custom bytecode program, shuffles opcode IDs per build, encodes constants, and embeds an encoded VM interpreter. It is a prototype and does not support the complete Lua 5.1 or Luau language.
+LuaMoon is an experimental Lua-subset source-to-bytecode obfuscator. This project is **not** a drop-in replacement for a complete Lua 5.1 or Luau compiler, and obfuscation cannot make client-side code impossible to reverse engineer.
 
-## Implemented in this prototype
+## Current implemented subset
 
 - Numeric, boolean, string, and nil constants
-- Unary `-`, `not`, and `#` expressions
-- Arithmetic, comparison, concatenation, and short-circuit `and` / `or` expressions
-- Local and global single-name assignments
-- Named function calls with arguments
-- `return` with a single expression or no value
-- `if` / `elseif` / `else`, `while`, `repeat` / `until`, `do` blocks, and `break` in loops
+- Arithmetic, comparison, concatenation, unary `-`, `not`, and `#`
+- Short-circuit `and` / `or`
+- Single-name assignments and local variables
+- Basic table constructors, dot/bracket indexing, and indexed assignment
+- `if` / `elseif` / `else`, `while`, `repeat` / `until`, `do`, and `break`
+- Named function calls with positional arguments
+- `local function f(...) ... end`, `function f(...) ... end`, and anonymous `function(...) ... end`
+- Single-value returns and closures that capture outer locals
+
+## Obfuscation / hardening layers
+
 - Per-build randomized opcode IDs
-- Encoded constant pool and encoded VM source
-- Explicit VM stack pointer so nil values do not break stack indexing
-- Arithmetic XOR and rotate decoding without requiring `bit32`
+- String and numeric constant encoding with XOR and byte rotation
+- Encoded VM source
+- Per-program arithmetic operand masking for bytecode operands and jump targets
+- Random no-op padding before instructions, with jump targets remapped to preserve control flow
+- Cryptographically sourced randomness for normal builds (`crypto.getRandomValues`); deterministic seeds are accepted for tests only
+- VM stack-underflow and invalid-opcode checks
 
-## Not implemented
+These are obfuscation layers, not cryptographic secrecy. The decoder, masks, and runtime logic must be present client-side and can be recovered by a determined analyst. No anti-debugging or environment-tampering behavior is included.
 
-This prototype does not implement the complete Lua or Luau grammar. In particular, table constructors and indexing, function declarations and closures, multiple assignment, multiple return values, numeric and generic `for`, method calls, metatables, coroutines, goto/labels, Luau type syntax, Luau interpolation, and many other language features are not supported. The parser should reject unsupported syntax rather than treating it as valid output.
+## Known limitations
 
-## Runtime requirements
+This remains a limited language subset. It does **not** yet implement full Lua/Luau semantics, including:
 
-The generated wrapper decrypts and loads its embedded VM code using `loadstring` or `load`. A target runtime that disables dynamic code loading will not run this output. Standard Lua 5.1 and Roblox Luau also differ in runtime behavior; compatibility has not been established for every environment.
+- Multiple assignment, multiple return values, varargs, and tail calls
+- Numeric/generic `for`, method calls (`:`), metatables, coroutines, `goto`, and labels
+- Full lexical block scoping and same-name local shadowing
+- Full Lua/Luau string escape and long-bracket string rules
+- Luau type annotations, interpolation, and Roblox-specific syntax
+- Exact Lua truthiness/metamethod/numeric semantics in every edge case
 
-## Development
+Function closures are supported for ordinary captured locals, but should be tested carefully if the source depends on complex shadowing or mutation patterns. Dynamic code loading (`loadstring` or `load`) is required by the generated wrapper and may be unavailable in the target environment.
 
-Requires Node.js 20 or later.
+## Test
+
+Requires Node.js 20+.
 
 ```sh
 npm test
 ```
 
-Run locally with Wrangler: `npm run dev`. Deploy with `npm run deploy` after configuring the Cloudflare project.
+The Node tests validate parsing and generated structure. For runtime compatibility, execute generated output in the exact target Lua/Luau runtime. A local Luau CLI smoke test was also performed for arithmetic, tables, loops, local functions, closures, and global function declarations.
 
-## Status
+## Cloudflare
 
-This is an incremental VM foundation, not a Luraph equivalent and not a production-ready full-language obfuscator. Tests validate parser behavior and generated wrapper structure; they do not execute generated output in a Lua/Luau runtime.
+```sh
+npm install
+npm run dev
+```
 
-## VM prototype update
+Deploy only after testing in your target environment:
 
-The current prototype additionally parses basic table constructors (`{1, name="x", [key]=value`), dot/bracket indexing, nested indexing, and indexed assignments. This remains a deliberately limited Lua subset, not complete Lua 5.1 or Luau. Function declarations, closures, loops beyond while/repeat, multi-return semantics, method syntax, and Luau-specific syntax are not fully supported. Tests validate parser/output structure; execute generated output in the exact target runtime before relying on it.
+```sh
+npm run deploy
+```
