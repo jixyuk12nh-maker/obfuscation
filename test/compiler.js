@@ -13,7 +13,7 @@ test("preserves Lua source syntax and encodes string constants", () => {
     "else",
     '  warn("not ready")',
     "end"
-  ].join("\\n");
+  ].join("\n");
   const output = compileLuaSubset(source, { seed: 1234 });
   assert.equal(output.includes('"LuaMoon"'), false);
   assert.match(output, /local count = 2/);
@@ -22,7 +22,7 @@ test("preserves Lua source syntax and encodes string constants", () => {
 });
 
 test("encodes numeric and escaped string constants", () => {
-  const output = compileLuaSubset('local n = -12.5\\nprint("hello\\nworld", n)', { seed: 1 });
+  const output = compileLuaSubset('local n = -12.5\nprint("hello\\nworld", n)', { seed: 1 });
   assert.equal(output.includes("hello"), false);
   assert.match(output, /local n = -12.5/);
 });
