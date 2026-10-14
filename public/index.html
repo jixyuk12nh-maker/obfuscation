@@ -63,17 +63,9 @@
         </div>
 
         <div class="language-row">
-          <label for="languageMode">Target syntax</label>
-          <select id="languageMode" aria-label="Target Lua syntax">
-            <option value="lua">Lua 5.1–5.4</option>
-            <option value="luau">Roblox Luau</option>
-          </select>
-          <label for="obfuscationMode">Obfuscation engine</label>
-          <select id="obfuscationMode" aria-label="Obfuscation engine">
-            <option value="vm">Luraph-style VM (experimental)</option>
-            <option value="compatibility">Compatibility (Lua/Luau)</option>
-          </select>
-          <span id="languageHint">VM compilation where supported; lexical fallback otherwise.</span>
+          <input id="languageMode" type="hidden" value="auto">
+          <input id="obfuscationMode" type="hidden" value="vm">
+          <span id="languageHint">Auto detect syntax + VM engine enabled.</span>
         </div>
 
         <div class="editor-wrap" id="sourceDropzone">

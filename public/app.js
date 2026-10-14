@@ -230,7 +230,20 @@ sourceDropzone.addEventListener("drop", async event => {
     }
 });
 
+function detectLuaTarget(source) {
+    const luauHints = [
+        /:\s*[A-Za-z_][A-Za-z0-9_]*\s*[=,)]/,
+        /\btype\s+[A-Za-z_]/,
+        /\bexport\s+type\b/,
+        /\bInstance\.new\b/,
+        /\bgame\s*:/,
+        /\bEnum\./
+    ];
+    return luauHints.some((r) => r.test(source)) ? "luau" : "lua";
+}
+
 function updateLanguageHint() {
+    if (languageModeEl) languageModeEl.value = detectLuaTarget(sourceEl?.value || "");
     if (obfuscationModeEl?.value === "vm") {
         languageHintEl.textContent = "Experimental VM mode: converts a supported Lua subset into encoded bytecode.";
         compileHintEl.textContent = languageModeEl.value === "luau"
@@ -246,7 +259,7 @@ function updateLanguageHint() {
     clearOutput();
 }
 
-languageModeEl.addEventListener("change", updateLanguageHint);
+sourceEl?.addEventListener("input", updateLanguageHint);
 updateLanguageHint();
 
 compileBtn.addEventListener("click", async () => {
