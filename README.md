@@ -1,63 +1,43 @@
-# LuaMoon — GitHub + Cloudflare Worker
+# LuaMoon VM Prototype
 
-This repository is a deployable starter for the LuaMoon web UI and API. Connect the repository to Cloudflare Workers Builds, or deploy with Wrangler. A push to the connected Git branch can trigger a new deployment.
+LuaMoon is an experimental source-to-bytecode obfuscator project for Lua-like scripts. This version emits a custom bytecode program, shuffles opcode IDs per build, encodes constants, and embeds an encoded VM interpreter. It is a prototype and does not support the complete Lua 5.1 or Luau language.
 
-## Compiler version
+## Implemented in this prototype
 
-The compiler emits the `Luamoon Obfuscator v2.0` wrapper. VM source and string/number constants are encoded, and bytecode opcode IDs are randomized per compilation. This is a lightweight custom VM design, not cryptographically secure encryption.
+- Numeric, boolean, string, and nil constants
+- Unary `-`, `not`, and `#` expressions
+- Arithmetic, comparison, concatenation, and short-circuit `and` / `or` expressions
+- Local and global single-name assignments
+- Named function calls with arguments
+- `return` with a single expression or no value
+- `if` / `elseif` / `else`, `while`, `repeat` / `until`, `do` blocks, and `break` in loops
+- Per-build randomized opcode IDs
+- Encoded constant pool and encoded VM source
+- Explicit VM stack pointer so nil values do not break stack indexing
+- Arithmetic XOR and rotate decoding without requiring `bit32`
 
-## Important scope and limitations
+## Not implemented
 
-- This is an original, small Lua-subset-to-custom-VM prototype, **not** a Luraph source-code recovery or clone.
-- It does **not** support all Lua 5.1 or Luau syntax. Unsupported syntax should return an error instead of being silently accepted.
-- The current compiler does not implement functions/closures, tables, indexing, method calls, numeric/generic `for`, repeat/until, varargs, Luau type syntax, and many standard-language edge cases.
-- Obfuscation is not encryption and does not guarantee that source code cannot be recovered.
-- The output must be tested in the exact Lua/Luau runtime where it will run. The generated wrapper uses Lua features such as `table.unpack or unpack`, and runtime globals can differ between environments.
-- The web API accepts source files up to 50 MiB, but the parser and compiler are synchronous and large inputs can consume substantial CPU and memory. Consider lowering this limit before public launch and add rate limiting.
+This prototype does not implement the complete Lua or Luau grammar. In particular, table constructors and indexing, function declarations and closures, multiple assignment, multiple return values, numeric and generic `for`, method calls, metatables, coroutines, goto/labels, Luau type syntax, Luau interpolation, and many other language features are not supported. The parser should reject unsupported syntax rather than treating it as valid output.
 
-## Deploy from Android / GitHub
+## Runtime requirements
 
-1. Create a GitHub repository named `luamoon` (private or public).
-2. Upload **all files and folders** from this project, preserving paths: `src/`, `public/`, `test/`, `package.json`, and `wrangler.jsonc`.
-3. In Cloudflare, open **Workers & Pages** and create a Worker using Git integration / connect the GitHub repository.
-4. Configure the build command as `npm install` if requested. The deployment command is `npm run deploy` for a CLI deployment; for Git-connected builds, follow the current Cloudflare Workers Builds prompts and use the configured build/deploy settings shown by the dashboard.
-5. For the simplest mobile workflow, use Cloudflare's Git integration so pushing changes to the connected branch deploys them automatically.
+The generated wrapper decrypts and loads its embedded VM code using `loadstring` or `load`. A target runtime that disables dynamic code loading will not run this output. Standard Lua 5.1 and Roblox Luau also differ in runtime behavior; compatibility has not been established for every environment.
 
-Official docs: https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/
+## Development
 
-## Deploy from Termux (alternative)
-
-Requires Node.js 20+ and a Cloudflare account. From the repository root:
+Requires Node.js 20 or later.
 
 ```sh
-npm install
 npm test
-npx wrangler login
-npm run deploy
 ```
 
-## Local development
+Run locally with Wrangler: `npm run dev`. Deploy with `npm run deploy` after configuring the Cloudflare project.
 
-```sh
-npm install
-npm run dev
-```
+## Status
 
-Wrangler prints a local URL. Open it in your phone browser.
+This is an incremental VM foundation, not a Luraph equivalent and not a production-ready full-language obfuscator. Tests validate parser behavior and generated wrapper structure; they do not execute generated output in a Lua/Luau runtime.
 
-## API
+## VM prototype update
 
-- `GET /api/health` — health check.
-- `POST /api/obfuscate` — JSON body: `{"source":"local x = 1\\nprint(x)"}`.
-
-## Project layout
-
-- `src/index.js` — Cloudflare Worker routes and static asset fallback.
-- `src/compiler.js` — lexer, parser, bytecode generator, and Lua VM emitter.
-- `public/` — website UI.
-- `test/` — basic compiler tests.
-- `wrangler.jsonc` — Workers Static Assets configuration.
-
-## Before public launch
-
-Add rate limiting, abuse monitoring, and a clear privacy policy. Do not log submitted source code. If the site will be used by others, test the API with real traffic and the generated output in every intended runtime. Do not put private tokens or secrets in the GitHub repository.
+The current prototype additionally parses basic table constructors (`{1, name="x", [key]=value`), dot/bracket indexing, nested indexing, and indexed assignments. This remains a deliberately limited Lua subset, not complete Lua 5.1 or Luau. Function declarations, closures, loops beyond while/repeat, multi-return semantics, method syntax, and Luau-specific syntax are not fully supported. Tests validate parser/output structure; execute generated output in the exact target runtime before relying on it.

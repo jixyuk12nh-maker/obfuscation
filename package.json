@@ -1,9 +1,9 @@
 {
   "name": "luamoon-cloudflare",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "LuaMoon website and Cloudflare Worker API for an original Lua subset VM obfuscator",
+  "description": "LuaMoon randomized-opcode VM prototype with table/index support for a documented Lua subset",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
