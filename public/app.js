@@ -2,6 +2,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 const sourceEl = document.querySelector("#source");
 const languageModeEl = document.querySelector("#languageMode");
+const obfuscationModeEl = document.querySelector("#obfuscationMode");
 const languageHintEl = document.querySelector("#languageHint");
 const compileHintEl = document.querySelector("#compileHint");
 const outputEl = document.querySelector("#output");
@@ -133,6 +134,12 @@ async function loadFile(file) {
     }
 }
 
+
+obfuscationModeEl?.addEventListener("change", () => {
+    updateLanguageHint();
+    setStatus("Ready");
+});
+
 sourceEl.addEventListener("input", () => {
     clearOutput();
     updateCounts();
@@ -224,12 +231,17 @@ sourceDropzone.addEventListener("drop", async event => {
 });
 
 function updateLanguageHint() {
-    if (languageModeEl.value === "luau") {
-        languageHintEl.textContent = "Luau syntax-preserving lexical obfuscation; no VM conversion.";
-        compileHintEl.textContent = "Use for Roblox Luau, including Luau-only syntax.";
+    if (obfuscationModeEl?.value === "vm") {
+        languageHintEl.textContent = "Experimental VM mode: converts a supported Lua subset into encoded bytecode.";
+        compileHintEl.textContent = languageModeEl.value === "luau"
+            ? "VM mode supports only a limited Luau-compatible subset; typed Luau, varargs, and many Roblox constructs are not supported yet."
+            : "VM mode uses an embedded bytecode interpreter. Test the output in your exact runtime before use.";
+    } else if (languageModeEl.value === "luau") {
+        languageHintEl.textContent = "Compatibility mode preserves broad Luau syntax; no VM conversion.";
+        compileHintEl.textContent = "Use for Roblox Luau syntax including type annotations and compound assignments.";
     } else {
-        languageHintEl.textContent = "VM compilation for the supported subset; lexical fallback otherwise.";
-        compileHintEl.textContent = "Use for standard Lua; verify the exact Lua version.";
+        languageHintEl.textContent = "Compatibility mode preserves broad Lua syntax; no VM conversion.";
+        compileHintEl.textContent = "Use for standard Lua when broad syntax compatibility matters.";
     }
     clearOutput();
 }
@@ -260,7 +272,8 @@ compileBtn.addEventListener("click", async () => {
             },
             body: JSON.stringify({
                 source: sourceEl.value,
-                language: languageModeEl.value
+                language: languageModeEl.value,
+                mode: obfuscationModeEl?.value || "compatibility"
             })
         });
 

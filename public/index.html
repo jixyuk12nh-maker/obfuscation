@@ -68,6 +68,11 @@
             <option value="lua">Lua 5.1–5.4</option>
             <option value="luau">Roblox Luau</option>
           </select>
+          <label for="obfuscationMode">Obfuscation engine</label>
+          <select id="obfuscationMode" aria-label="Obfuscation engine">
+            <option value="vm">Luraph-style VM (experimental)</option>
+            <option value="compatibility">Compatibility (Lua/Luau)</option>
+          </select>
           <span id="languageHint">VM compilation where supported; lexical fallback otherwise.</span>
         </div>
 
