@@ -31,11 +31,13 @@ The test suite checks representative Lua/Luau syntax and lexical transformations
 
 This is a compatibility-first lexical obfuscator, not a complete AST-based obfuscator. It performs conservative top-level local renaming, but does not perform full scope-aware renaming for all grammar constructs or control-flow flattening. It does not claim to validate every grammar production. Always test output in the exact target Lua/Luau runtime, especially for byte encodings and language-version-specific syntax. Backtick interpolated strings are preserved as-is to avoid altering Luau interpolation semantics.
 
-## Experimental VM engine
+## VM engine
 
-The web UI and `POST /api/obfuscate` also support `{ "mode": "vm" }`. This mode parses a deliberately limited Lua subset, compiles it into custom instructions, shuffles opcode IDs, masks operands, inserts control-flow NOP padding, encodes constants, and embeds a VM interpreter. It is a real prototype virtualization path, not the compatibility transform.
+The web UI and `POST /api/obfuscate` also support `{ "mode": "vm" }`. This mode parses Lua/Luau source into a stack-machine bytecode, shuffles opcode IDs, masks operands, inserts control-flow NOP padding, encodes constants, and embeds an interpreter. Coverage is nearly all Lua 5.x syntax: varargs, multiple returns and assignment, generic and numeric `for`, `goto`/labels, method and dotted function definitions, long strings and comments, hex floats, integer division and bitwise operators, and per-iteration closure capture. Luau compound assignment (`+=` etc.) and `continue` are supported; Luau type annotations are not.
 
-Current VM limitations are significant: it does not implement the full Lua grammar or Roblox Luau type system; multiple assignment/returns, varargs, generic `for ... in`, `continue`, compound assignment, interpolation strings, and many other constructs are not supported. Numeric `for` (`for i = start, stop[, step] do ... end`) is supported as of the 2026-10 update — see [`VM-FIXES-2026-10.md`](VM-FIXES-2026-10.md). Runtime execution uses `loadstring`/`load` to initialize the embedded VM and encoded data, so the target environment must allow dynamic code loading. Test output in the actual Lua/Luau runtime before using it. Use `mode: "compatibility"` for broad syntax preservation. This prototype is not equivalent to Luraph and should not be marketed as Luraph-grade.
+Limits: the interpreter runs in Lua itself, so it is much slower than native code. Bitwise operators act on 32-bit unsigned values. Lua 5.4 `<close>` variables are parsed but not closed. The generated code calls `loadstring`/`load` at startup, so the target environment must allow dynamic code loading. Test output in the exact target runtime. Use `mode: "compatibility"` for speed and broad syntax preservation. This prototype is not equivalent to Luraph and should not be marketed as Luraph-grade.
+
+The output carries a salted integrity checksum over its encoded blobs. Editing the shipped text by hand makes it refuse to run (`LuaMoon VM: integrity check failed`). To change protected code, edit the source and recompile.
 
 ## Run
 
