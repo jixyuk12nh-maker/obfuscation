@@ -245,9 +245,9 @@ function detectLuaTarget(source) {
 function updateLanguageHint() {
     if (languageModeEl) languageModeEl.value = detectLuaTarget(sourceEl?.value || "");
     if (obfuscationModeEl?.value === "vm") {
-        languageHintEl.textContent = "Experimental VM mode: converts a supported Lua subset into encoded bytecode.";
+        languageHintEl.textContent = "Experimental VM mode: compiles nearly all Lua syntax into encoded bytecode.";
         compileHintEl.textContent = languageModeEl.value === "luau"
-            ? "VM mode supports only a limited Luau-compatible subset; typed Luau, varargs, and many Roblox constructs are not supported yet."
+            ? "VM mode covers Luau syntax except type annotations. Expect a large slowdown versus native code."
             : "VM mode uses an embedded bytecode interpreter. Test the output in your exact runtime before use.";
     } else if (languageModeEl.value === "luau") {
         languageHintEl.textContent = "Compatibility mode preserves broad Luau syntax; no VM conversion.";
