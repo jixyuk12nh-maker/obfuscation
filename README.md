@@ -1,65 +1,38 @@
-# LuaMoon VM — Security Update
+# LuaMoon — Lua / Luau Syntax-Preserving Obfuscator
 
-LuaMoon is an experimental Lua-subset source-to-bytecode obfuscator. This project is **not** a drop-in replacement for a complete Lua 5.1 or Luau compiler, and obfuscation cannot make client-side code impossible to reverse engineer.
+> Research update: implementation strategy was checked against the Prometheus obfuscator and the official Luau repository. See [`docs/GITHUB-RESEARCH.md`](docs/GITHUB-RESEARCH.md) for sources and limits.
 
-## Current implemented subset
+LuaMoon transforms Lua and Roblox Luau source without compiling it through a limited custom VM. The transformer scans lexical constructs (quoted strings, long-bracket strings/comments, line comments, directives, and Luau backtick strings), then encodes eligible string literals and removes ordinary comments while preserving line breaks and the surrounding source syntax.
 
-- Numeric, boolean, string, and nil constants
-- Arithmetic, comparison, concatenation, unary `-`, `not`, and `#`
-- Short-circuit `and` / `or`
-- Single-name assignments and local variables
-- Basic table constructors, dot/bracket indexing, and indexed assignment
-- `if` / `elseif` / `else`, `while`, `repeat` / `until`, `do`, and `break`
-- Named function calls with positional arguments
-- `local function f(...) ... end`, `function f(...) ... end`, and anonymous `function(...) ... end`
-- Single-value returns and closures that capture outer locals
+## Why this architecture
 
-## Obfuscation / hardening layers
+A partial hand-written parser rejects many valid programs (method calls, multiple assignment/returns, varargs, `goto`, version-specific operators, Luau type declarations, compound assignment, and other syntax). LuaMoon's compatibility mode therefore does not parse or recompile the program. It performs lexical transformations only, so unrecognized language constructs are left intact rather than sent through the prototype VM.
 
-- Per-build randomized opcode IDs
-- String and numeric constant encoding with XOR and byte rotation
-- Per-build randomized 64-character printable alphabet for packed payload strings instead of visible giant numeric `_KW`, `_CT`, and `_BC` tables
-- Per-build XOR masking for the packed program-data blob
-- Encoded VM source
-- Per-program arithmetic operand masking for bytecode operands and jump targets
-- Random no-op padding before instructions, with jump targets remapped to preserve control flow
-- Cryptographically sourced randomness for normal builds (`crypto.getRandomValues`); deterministic seeds are accepted for tests only
-- VM stack-underflow and invalid-opcode checks
+## Language modes
 
-These are obfuscation layers, not cryptographic secrecy. Random-alphabet packed blobs make the generated text look like dense symbol-heavy encoded strings rather than ordinary Base64 or numeric tables, but the runtime decoder and data can still be recovered. The decoder, masks, and runtime logic must be present client-side and can be recovered by a determined analyst. No anti-debugging or environment-tampering behavior is included.
+- `lua`: syntax-preserving lexical obfuscation for Lua source. Use a matching Lua runtime/version to validate the result.
+- `luau`: syntax-preserving lexical obfuscation for Roblox Luau. Type-level string literals and `--!` directives are conservatively preserved; backtick interpolated strings are left intact.
 
-## Known limitations
+## Transformations
 
-This remains a limited language subset. It does **not** yet implement full Lua/Luau semantics, including:
+- Ordinary quoted and long-bracket string literals are converted to decimal-escaped byte strings, split into randomized chunks when needed.
+- Ordinary line and long-bracket comments are blanked while retaining line breaks.
+- `--!` directives are preserved.
+- Source is not wrapped in `loadstring`/`load`; the transformed program remains source code.
 
-- Multiple assignment, multiple return values, varargs, and tail calls
-- Numeric/generic `for`, method calls (`:`), metatables, coroutines, `goto`, and labels
-- Full lexical block scoping and same-name local shadowing
-- Full Lua/Luau string escape and long-bracket string rules
-- Luau type annotations, interpolation, and Roblox-specific syntax
-- Exact Lua truthiness/metamethod/numeric semantics in every edge case
+## Validation status
 
-Function closures are supported for ordinary captured locals, but should be tested carefully if the source depends on complex shadowing or mutation patterns. Dynamic code loading (`loadstring` or `load`) is required by the generated wrapper and may be unavailable in the target environment.
+The test suite checks representative Lua/Luau syntax and lexical transformations. It is not an exhaustive grammar conformance suite. Run output through the exact target Lua runtime or the official Luau compiler before production use.
 
-## Test
+## Limitations
 
-Requires Node.js 20+.
+This is a compatibility-first lexical obfuscator, not a complete AST-based obfuscator. It does not currently rename local variables or perform control-flow flattening. It does not claim to validate every grammar production. Always test output in the exact target Lua/Luau runtime, especially for byte encodings and language-version-specific syntax. Backtick interpolated strings are preserved as-is to avoid altering Luau interpolation semantics.
+
+## Run
 
 ```sh
 npm test
-```
-
-The Node tests validate parsing and generated structure. For runtime compatibility, execute generated output in the exact target Lua/Luau runtime. A local Luau CLI smoke test was also performed for arithmetic, tables, loops, local functions, closures, and global function declarations.
-
-## Cloudflare
-
-```sh
-npm install
 npm run dev
 ```
 
-Deploy only after testing in your target environment:
-
-```sh
-npm run deploy
-```
+The Cloudflare Worker exposes `POST /api/obfuscate` with JSON `{ "source": "...", "language": "lua" }` or `{ "source": "...", "language": "luau" }`.
