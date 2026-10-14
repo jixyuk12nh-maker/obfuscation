@@ -1,4 +1,13 @@
-const KEYWORDS = new Set(["local", "function", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not"]);
+const KEYWORDS = new Set(["local", "function", "return", "if", "then", "elseif", "else", "end", "while", "repeat", "until", "do", "break", "true", "false", "nil", "and", "or", "not", "for"]);
+
+// Marker wrapper so a decoded string-literal byte array (which may contain
+// raw, non-UTF8 byte values from \xNN / \ddd / \z escapes) is never silently
+// round-tripped through a JS string and re-encoded as UTF-8 later, which
+// would corrupt any byte above U+007F. Identifier/name constants stay plain
+// JS strings and are unaffected.
+function rawStringConstant(bytes) {
+  return { __lmRawString: true, bytes };
+}
 
 function lex(source) {
   const tokens = [];
@@ -16,27 +25,40 @@ function lex(source) {
     if (c === "'" || c === '"') {
       const quote = c;
       i++;
-      let value = "";
       let closed = false;
       while (i < source.length) {
-        const ch = source[i++];
-        if (ch === quote) { closed = true; break; }
-        if (ch === "\\") {
-          if (i >= source.length) break;
-          const esc = source[i++];
-          const map = { n: "\n", r: "\r", t: "\t", "\\": "\\", "'": "'", '"': '"', "0": "\0" };
-          value += Object.hasOwn(map, esc) ? map[esc] : esc;
-        } else value += ch;
+        if (source[i] === "\\") { i += 2; continue; }
+        if (source[i] === quote) { i++; closed = true; break; }
+        i++;
       }
       if (!closed) throw new Error(`Unclosed string at character ${start + 1}.`);
-      push("string", value, start);
+      // Reuse the full escape decoder (handles \n \t \xNN \ddd \u{...} \z,
+      // and line continuations) instead of the old 7-escape lookup table,
+      // so VM mode no longer silently corrupts strings that use decimal,
+      // hex, or unicode escapes.
+      const bytes = decodeLuaStringBytes(source.slice(start, i), "quoted");
+      push("string", rawStringConstant(bytes), start);
+      continue;
+    }
+    if (c === "0" && (source[i + 1] === "x" || source[i + 1] === "X")) {
+      const m = source.slice(i).match(/^0[xX][0-9a-fA-F]+/);
+      if (m && /^[.pP]/.test(source[i + m[0].length] || "")) {
+        throw new Error(`Hex float literals are not supported (character ${i + 1}).`);
+      }
+      if (!m) throw new Error(`Invalid hex number at character ${i + 1}.`);
+      i += m[0].length;
+      const num = parseInt(m[0], 16);
+      if (!Number.isFinite(num)) throw new Error(`Hex number out of range at character ${start + 1}.`);
+      push("number", num, start);
       continue;
     }
     if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(source[i + 1] || ""))) {
       const m = source.slice(i).match(/^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
       if (!m) throw new Error(`Invalid number at character ${i + 1}.`);
       i += m[0].length;
-      push("number", Number(m[0]), start);
+      const num = Number(m[0]);
+      if (!Number.isFinite(num)) throw new Error(`Numeric literal out of range at character ${start + 1}.`);
+      push("number", num, start);
       continue;
     }
     if (/[A-Za-z_]/.test(c)) {
@@ -162,6 +184,23 @@ class Parser {
       const body = this.block(new Set(["end"]));
       this.expect("end");
       return { type: "while", test, body };
+    }
+    if (this.is("for")) {
+      this.take();
+      const name = this.identifier();
+      if (!this.is("=")) {
+        throw new Error(`Generic 'for ... in' loops are not supported in VM mode yet (character ${this.peek().pos + 1}). Use Compatibility mode, or a 'while' loop with numeric indices.`);
+      }
+      this.take();
+      const start = this.expression();
+      this.expect(",");
+      const stop = this.expression();
+      let step = null;
+      if (this.is(",")) { this.take(); step = this.expression(); }
+      this.expect("do");
+      const body = this.block(new Set(["end"]));
+      this.expect("end");
+      return { type: "numericFor", name, start, stop, step, body };
     }
     if (this.peek().type === "identifier") {
       const target = this.suffixedPrimary();
@@ -332,8 +371,7 @@ function shuffleArray(arr, rng) {
   return arr;
 }
 
-function encodeXorRotate(value, rng) {
-  const bytes = new TextEncoder().encode(value);
+function encodeXorRotateBytes(bytes, rng) {
   const key = Array.from({ length: 4 }, () => 1 + Math.floor(rng() * 254));
   const rot = 1 + Math.floor(rng() * 7);
   const out = new Uint8Array(bytes.length + 5);
@@ -346,10 +384,21 @@ function encodeXorRotate(value, rng) {
   return out;
 }
 
+function encodeXorRotate(value, rng) {
+  return encodeXorRotateBytes(new TextEncoder().encode(value), rng);
+}
+
 function encodeConstant(value, rng) {
   if (value === null) return { tag: "z", bytes: new Uint8Array(0) };
   if (typeof value === "boolean") return { tag: value ? "t" : "f", bytes: new Uint8Array(0) };
   if (typeof value === "number") return { tag: "n", bytes: encodeXorRotate(String(value), rng) };
+  // String literal tokens carry raw decoded bytes (see rawStringConstant) so
+  // escapes like \xFF round-trip exactly instead of being coerced through a
+  // JS string and re-encoded as UTF-8. Identifier/name constants are plain
+  // JS strings and keep the previous text-based path.
+  if (value && typeof value === "object" && value.__lmRawString) {
+    return { tag: "s", bytes: encodeXorRotateBytes(Uint8Array.from(value.bytes), rng) };
+  }
   return { tag: "s", bytes: encodeXorRotate(String(value), rng) };
 }
 
@@ -380,7 +429,25 @@ function encodeMaskedText(value, rng, alphabet) {
   return { text: base64Encode(bytes, alphabet), key };
 }
 
-function compileAst(ast, rng, functions = [], params = []) {
+// Adler-32-style rolling checksum, salted per build. Deliberately avoids any
+// op (imul, >>>, bitwise XOR of 32-bit values) that Lua 5.1 doubles cannot
+// reproduce exactly: every intermediate value here stays well under 2^53, so
+// the Lua-side `_cksum` reimplementation (see emitLua) always agrees bit for
+// bit with this one. Used to detect static patching of the two embedded
+// blobs (encoded VM source, encoded bytecode/constant payload) before they
+// are ever decoded or handed to loadstring/load.
+function checksum32(str, saltA, saltB) {
+  const MOD = 65521;
+  let a = (1 + saltA) % MOD;
+  let b = saltB % MOD;
+  for (let i = 0; i < str.length; i++) {
+    a = (a + str.charCodeAt(i)) % MOD;
+    b = (b + a) % MOD;
+  }
+  return b * 65536 + a;
+}
+
+function compileAst(ast, rng, functions = [], params = [], tempCounter = { n: 0 }) {
   const code = [];
   const constants = [];
   const constantMap = new Map();
@@ -393,11 +460,15 @@ function compileAst(ast, rng, functions = [], params = []) {
     }
     return constantMap.get(key);
   }
+  // "#" cannot appear in a source-level identifier (the lexer only accepts
+  // [A-Za-z0-9_]), so these generated scratch names can never collide with a
+  // real local/parameter name, even across nested closures sharing one counter.
+  function tempName(tag) { return `#${tag}${tempCounter.n++}`; }
   const paramConstants = params.map(name => constant(name));
   function registerFunction(fn) {
     const id = functions.length + 1;
     functions.push(null);
-    const child = compileAst(fn.body, rng, functions, fn.params);
+    const child = compileAst(fn.body, rng, functions, fn.params, tempCounter);
     functions[id - 1] = child;
     return id;
   }
@@ -456,11 +527,6 @@ function compileAst(ast, rng, functions = [], params = []) {
       } else if (s.type === "localFunction" || s.type === "functionDecl") {
         expr(s.func);
         emit("STORE", constant(s.name), s.type === "localFunction" ? 1 : 0);
-      } else if (s.type === "call") {
-        expr({ type: "variable", name: s.name });
-        for (const arg of s.args) expr(arg);
-        emit("CALL", 0, s.args.length);
-        emit("POP");
       } else if (s.type === "callExpr") {
         expr(s.expression);
         emit("POP");
@@ -491,6 +557,64 @@ function compileAst(ast, rng, functions = [], params = []) {
         loopBreaks.push(breaks);
         block(s.body);
         loopBreaks.pop();
+        emit("JMP", start);
+        const end = code.length + 1;
+        patch(jf, end);
+        for (const jump of breaks) patch(jump, end);
+      } else if (s.type === "numericFor") {
+        // Desugared into existing opcodes (no new VM instructions needed):
+        //   local #start = <start>; local #stop = <stop>; local #step = <step or 1>
+        //   while (#step > 0 and #start <= #stop) or (#step <= 0 and #start >= #stop) do
+        //     local NAME = #start
+        //     <body>
+        //     #start = #start + #step
+        //   end
+        // The hidden counter is separate from NAME, so user code may freely
+        // reassign NAME inside the body without disturbing iteration, matching
+        // Lua's read-only-control-variable semantics.
+        const startName = tempName("fs");
+        const stopName = tempName("fe");
+        const stepName = tempName("fi");
+        const v = name => ({ type: "variable", name });
+        const zero = { type: "constant", value: 0 };
+        expr(s.start);
+        emit("STORE", constant(startName), 1);
+        expr(s.stop);
+        emit("STORE", constant(stopName), 1);
+        if (s.step) expr(s.step); else emit("PUSH", constant(1));
+        emit("STORE", constant(stepName), 1);
+        // A zero step would otherwise satisfy "step<=0 and start>=stop" forever
+        // once start==stop, hanging the interpreter in an infinite loop. Real
+        // Lua rejects this at runtime ("'for' step is zero"); match that
+        // instead of silently looping forever.
+        expr({ type: "binary", op: "==", left: v(stepName), right: zero });
+        const stepOk = emit("JMPF", 0);
+        expr({
+          type: "call",
+          callee: { type: "variable", name: "error" },
+          args: [{ type: "constant", value: rawStringConstant(Array.from(new TextEncoder().encode("LuaMoon VM: 'for' step is zero"))) }]
+        });
+        emit("POP");
+        patch(stepOk, code.length + 1);
+        const start = code.length + 1;
+        expr({
+          type: "binary", op: "or",
+          left: { type: "binary", op: "and",
+            left: { type: "binary", op: ">", left: v(stepName), right: zero },
+            right: { type: "binary", op: "<=", left: v(startName), right: v(stopName) } },
+          right: { type: "binary", op: "and",
+            left: { type: "binary", op: "<=", left: v(stepName), right: zero },
+            right: { type: "binary", op: ">=", left: v(startName), right: v(stopName) } }
+        });
+        const jf = emit("JMPF", 0);
+        const breaks = [];
+        loopBreaks.push(breaks);
+        emit("LOAD", constant(startName));
+        emit("STORE", constant(s.name), 1);
+        block(s.body);
+        loopBreaks.pop();
+        expr({ type: "binary", op: "+", left: v(startName), right: v(stepName) });
+        emit("STORE", constant(startName), 0);
         emit("JMP", start);
         const end = code.length + 1;
         patch(jf, end);
@@ -706,11 +830,41 @@ return _vm`;
   const payloadSource = `return {CT=${root.CT},BC=${root.BC},FUNCS=${funcsLua},MA=${root.MA},MB=${root.MB}}`;
   const payload = encodeMaskedText(payloadSource, rng, packedAlphabet);
   const encodedVm = base64Encode(encryptedVm, packedAlphabet);
+
+  // Tamper-detection checksums over the two raw encoded blobs, taken before
+  // any decoding happens. Salts are fresh per build so a patch script can't
+  // be written once against a fixed salt/constant pair and reused across
+  // outputs. A mismatch means the shipped text was edited after compilation
+  // (string.dump-free static patch, hex edit, whitespace-preserving find &
+  // replace, etc.) and the loader refuses to run rather than executing
+  // unknown bytecode.
+  const vmSaltA = Math.floor(rng() * 65521);
+  const vmSaltB = Math.floor(rng() * 65521);
+  const dataSaltA = Math.floor(rng() * 65521);
+  const dataSaltB = Math.floor(rng() * 65521);
+  const vmChecksum = checksum32(encodedVm, vmSaltA, vmSaltB);
+  const dataChecksum = checksum32(payload.text, dataSaltA, dataSaltB);
+
   return `return (function()
 local _A=${JSON.stringify(packedAlphabet)}
 local _KW=${JSON.stringify(encodedVm)}
 local _D=${JSON.stringify(payload.text)}
 local _Q=${payload.key}
+local _VA,_VB,_VC=${vmSaltA},${vmSaltB},${vmChecksum}
+local _DA,_DB,_DC=${dataSaltA},${dataSaltB},${dataChecksum}
+local function _cksum(s,sa,sb)
+local MOD=65521
+local a=(1+sa)%MOD
+local b=sb%MOD
+for i=1,#s do
+a=(a+string.byte(s,i))%MOD
+b=(b+a)%MOD
+end
+return b*65536+a
+end
+if _cksum(_KW,_VA,_VB)~=_VC or _cksum(_D,_DA,_DB)~=_DC then
+error("LuaMoon VM: integrity check failed",0)
+end
 local function _u(s)
 local M={}
 for i=1,#_A do M[string.sub(_A,i,i)]=i-1 end

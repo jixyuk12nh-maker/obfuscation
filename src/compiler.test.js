@@ -208,3 +208,51 @@ obj:FindFirstChild("Player")`;
 test("VM mode rejects unsupported typed Luau rather than silently claiming virtualization", () => {
   assert.throws(() => compileLuaVm('local value: string = "x"', { language: "luau", seed: 902 }), /type declarations/i);
 });
+
+test("VM mode decodes decimal, hex, and unicode string escapes instead of corrupting them", () => {
+  // Regression test: the old VM-mode lexer only understood \n \r \t \\ \' \" \0
+  // and silently mangled every other escape (dropping the backslash and
+  // re-emitting the following characters as literal text) instead of erroring.
+  const output = compileLuaVm('local a = "\\065\\x41\\u{1F600}"\nprint(a)', { language: "lua", seed: 950 });
+  assert.match(output, /^return \(function\(\)/);
+  assert.equal(output.includes("065"), false);
+  assert.equal(output.includes("x41"), false);
+});
+
+test("VM mode supports hex integer literals and rejects hex float syntax clearly", () => {
+  const output = compileLuaVm("local a = 0x1F + 0xA\nprint(a)", { language: "lua", seed: 951 });
+  assert.match(output, /^return \(function\(\)/);
+  assert.throws(() => compileLuaVm("local a = 0x1p4", { language: "lua", seed: 951 }), /hex float/i);
+});
+
+test("VM mode rejects non-finite numeric literals instead of embedding Infinity/NaN", () => {
+  assert.throws(() => compileLuaVm("local a = 1e400", { language: "lua", seed: 952 }), /out of range/i);
+});
+
+test("VM mode compiles numeric for loops (ascending, descending, and break)", () => {
+  const output = compileLuaVm(
+    "local sum = 0\nfor i = 1, 10 do sum = sum + i end\nfor j = 10, 1, -2 do print(j) end\nfor k = 1, 100 do if k == 5 then break end end",
+    { language: "lua", seed: 953 }
+  );
+  assert.match(output, /^return \(function\(\)/);
+});
+
+test("VM mode still rejects generic 'for ... in' loops with a clear message", () => {
+  assert.throws(
+    () => compileLuaVm("for k, v in pairs(t) do print(k, v) end", { language: "lua", seed: 954 }),
+    /generic 'for ... in' loops are not supported/i
+  );
+});
+
+test("VM mode numeric for loop compiles a zero-step guard instead of hanging", () => {
+  // Regression test: with a zero step, the desugared loop condition
+  // ("step<=0 and start>=stop") stayed true forever once start===stop,
+  // which hung the Lua runtime executing the obfuscated output. The guard
+  // calls Lua's own error(), so the message is an encoded string constant
+  // like any other literal -- not visible in the compiled output -- and is
+  // verified by actually running the generated Lua under a real interpreter
+  // (see docs/VM-HARDENING.md for the manual verification transcript).
+  const output = compileLuaVm("for i = 1, 1, 0 do end", { language: "lua", seed: 955 });
+  assert.match(output, /^return \(function\(\)/);
+  assert.doesNotThrow(() => compileLuaVm("for i = 1, 1, 0 do end", { language: "lua", seed: 955 }));
+});

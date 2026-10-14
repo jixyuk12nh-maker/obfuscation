@@ -3,13 +3,70 @@ import { compileLuaSubset, compileLuaVm } from "./compiler.js";
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 55 * 1024 * 1024;
 
-function json(data, status = 200) {
+// Best-effort, single-isolate rate limit. Cloudflare reuses an isolate across
+// many requests, so this meaningfully throttles a single abusive source even
+// though it resets on cold start and isn't shared across edge locations. It
+// is a backstop, not a substitute for a dashboard Rate Limiting rule or a
+// Durable Object / KV-backed limiter if stronger guarantees are needed.
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 30;
+const rateBuckets = new Map();
+
+function isRateLimited(key) {
+  const now = Date.now();
+  if (rateBuckets.size > 10_000) {
+    for (const [k, bucket] of rateBuckets) {
+      if (now - bucket.start > RATE_LIMIT_WINDOW_MS) rateBuckets.delete(k);
+    }
+  }
+  let bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW_MS) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(key, bucket);
+  }
+  bucket.count++;
+  return bucket.count > RATE_LIMIT_MAX_REQUESTS;
+}
+
+// Reads the body as UTF-8 text while bailing out as soon as more than
+// maxBytes has arrived, instead of buffering an unbounded/declared-false
+// body in full (request.text()) before the size is checked. The declared
+// Content-Length header is advisory only -- a client can omit or lie about
+// it -- so this is the actual enforcement point.
+async function readBoundedText(request, maxBytes) {
+  if (!request.body) return await request.text();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        const error = new Error("Request too large.");
+        error.tooLarge = true;
+        throw error;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released/cancelled */ }
+  }
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+}
+
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff"
+      "X-Content-Type-Options": "nosniff",
+      ...extraHeaders
     }
   });
 }
@@ -27,6 +84,11 @@ export default {
         return json({ error: "Use POST for this endpoint." }, 405);
       }
 
+      const clientKey = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "unknown";
+      if (isRateLimited(clientKey)) {
+        return json({ error: "Too many requests. Please slow down and try again shortly." }, 429, { "Retry-After": "30" });
+      }
+
       const contentType = request.headers.get("content-type") || "";
       if (!contentType.toLowerCase().includes("application/json")) {
         return json({ error: "Content-Type must be application/json." }, 415);
@@ -39,12 +101,10 @@ export default {
 
       let data;
       try {
-        const raw = await request.text();
-        if (new TextEncoder().encode(raw).byteLength > MAX_REQUEST_BYTES) {
-          return json({ error: "Request too large. Maximum request size is 55 MiB." }, 413);
-        }
+        const raw = await readBoundedText(request, MAX_REQUEST_BYTES);
         data = JSON.parse(raw || "{}");
-      } catch {
+      } catch (error) {
+        if (error?.tooLarge) return json({ error: "Request too large. Maximum request size is 55 MiB." }, 413);
         return json({ error: "Invalid JSON request." }, 400);
       }
 
