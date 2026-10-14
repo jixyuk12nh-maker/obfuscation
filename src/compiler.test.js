@@ -189,7 +189,7 @@ test("VM mode emits encoded bytecode wrapper instead of the original source", ()
 local count = 2
 if count > 1 then print(message .. "!") else warn("no") end`;
   const output = compileLuaVm(source, { language: "lua", seed: 900 });
-  assert.match(output, /^return \(function\(\)/);
+  assert.match(output, /^return \(function\(/);
   assert.equal(output.includes("VM_SECRET_MARKER"), false);
   assert.equal(output.includes('local message ='), false);
   assert.ok(output.length > source.length * 2);
@@ -214,15 +214,15 @@ test("VM mode decodes decimal, hex, and unicode string escapes instead of corrup
   // and silently mangled every other escape (dropping the backslash and
   // re-emitting the following characters as literal text) instead of erroring.
   const output = compileLuaVm('local a = "\\065\\x41\\u{1F600}"\nprint(a)', { language: "lua", seed: 950 });
-  assert.match(output, /^return \(function\(\)/);
+  assert.match(output, /^return \(function\(/);
   assert.equal(output.includes("065"), false);
   assert.equal(output.includes("x41"), false);
 });
 
-test("VM mode supports hex integer literals and rejects hex float syntax clearly", () => {
-  const output = compileLuaVm("local a = 0x1F + 0xA\nprint(a)", { language: "lua", seed: 951 });
-  assert.match(output, /^return \(function\(\)/);
-  assert.throws(() => compileLuaVm("local a = 0x1p4", { language: "lua", seed: 951 }), /hex float/i);
+test("VM mode supports hex integer and hex float literals", () => {
+  const output = compileLuaVm("local a = 0x1F + 0xA\nlocal b = 0x1p4\nprint(a, b)", { language: "lua", seed: 951 });
+  assert.match(output, /^return \(function\(/);
+  assert.doesNotThrow(() => compileLuaVm("local a = 0x1.8p1", { language: "lua", seed: 951 }));
 });
 
 test("VM mode rejects non-finite numeric literals instead of embedding Infinity/NaN", () => {
@@ -234,14 +234,12 @@ test("VM mode compiles numeric for loops (ascending, descending, and break)", ()
     "local sum = 0\nfor i = 1, 10 do sum = sum + i end\nfor j = 10, 1, -2 do print(j) end\nfor k = 1, 100 do if k == 5 then break end end",
     { language: "lua", seed: 953 }
   );
-  assert.match(output, /^return \(function\(\)/);
+  assert.match(output, /^return \(function\(/);
 });
 
-test("VM mode still rejects generic 'for ... in' loops with a clear message", () => {
-  assert.throws(
-    () => compileLuaVm("for k, v in pairs(t) do print(k, v) end", { language: "lua", seed: 954 }),
-    /generic 'for ... in' loops are not supported/i
-  );
+test("VM mode compiles generic 'for ... in' loops", () => {
+  const output = compileLuaVm("for k, v in pairs(t) do print(k, v) end", { language: "lua", seed: 954 });
+  assert.match(output, /^return \(function\(/);
 });
 
 test("VM mode numeric for loop compiles a zero-step guard instead of hanging", () => {
@@ -253,6 +251,27 @@ test("VM mode numeric for loop compiles a zero-step guard instead of hanging", (
   // verified by actually running the generated Lua under a real interpreter
   // (see docs/VM-HARDENING.md for the manual verification transcript).
   const output = compileLuaVm("for i = 1, 1, 0 do end", { language: "lua", seed: 955 });
-  assert.match(output, /^return \(function\(\)/);
+  assert.match(output, /^return \(function\(/);
   assert.doesNotThrow(() => compileLuaVm("for i = 1, 1, 0 do end", { language: "lua", seed: 955 }));
+});
+
+test("VM mode compiles varargs, multiple returns, goto, bitwise ops, and float literals", () => {
+  const source = `local function f(...) local a, b = ... return select("#", ...), a, b end
+local x, y = f(1, 2)
+for i = 1, 3 do if i == 2 then goto skip end print(i) ::skip:: end
+print(5 & 3, 5 | 3, 5 ~ 3, ~0, 1 << 4, 7 // 2, 1e3)
+local t = {f(1), n = 1}`;
+  const output = compileLuaVm(source, { language: "lua", seed: 960 });
+  assert.match(output, /^return \(function\(/);
+  assert.equal(output.includes("skip"), false);
+});
+
+test("VM mode compiles Luau compound assignment and continue", () => {
+  const output = compileLuaVm("local n = 1\nn += 2\nfor i = 1, 3 do if i == 2 then continue end end", { language: "luau", seed: 961 });
+  assert.match(output, /^return \(function\(/);
+});
+
+test("VM mode reports vararg use outside a vararg function and undefined goto labels", () => {
+  assert.throws(() => compileLuaVm("local function f() return ... end", { language: "lua", seed: 962 }), /vararg function/i);
+  assert.throws(() => compileLuaVm("goto nowhere", { language: "lua", seed: 963 }), /no visible label/i);
 });

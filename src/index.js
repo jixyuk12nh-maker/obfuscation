@@ -131,7 +131,7 @@ export default {
           language,
           mode,
           note: mode === "vm"
-            ? "Experimental bytecode VM mode: source is parsed into a limited AST, compiled to encoded VM instructions, and executed by an embedded interpreter. It supports only a subset of Lua/Luau; validate with the exact target runtime."
+            ? "Experimental bytecode VM mode: source is parsed, compiled to encoded stack-VM instructions, and executed by an embedded interpreter. It covers nearly all Lua 5.x syntax (varargs, multiple returns/assignment, generic for, goto, integer/float ops, bitwise ops) and Luau's compound assignment and continue; Luau type annotations are not supported. Interpreted code runs much slower than native Lua. Validate with the exact target runtime."
             : language === "luau"
               ? "Compatibility mode preserves broad Luau source syntax and applies token-aware string encoding/comment removal plus conservative local renaming. This is not VM virtualization."
               : "Compatibility mode preserves broad Lua source syntax and applies token-aware string encoding/comment removal plus conservative local renaming. This is not VM virtualization."
