@@ -16,17 +16,17 @@ test("compiles the documented VM example", () => {
   ].join("\n");
   const output = compileLuaSubset(source, { seed: 1234 });
   assert.match(output, /local _KW=/);
-  assert.match(output, /local _BC=/);
-  assert.match(output, /local _src=_dk\(_KW\)/);
+  assert.match(output, /local _D=/);
+  assert.match(output, /local _src=_dk\(_u\(_KW\)\)/);
 });
 
 test("encodes numeric and escaped string constants", () => {
   const output = compileLuaSubset('local n = -12.5\nprint("hello\\nworld", n)', { seed: 1 });
-  assert.match(output, /local _CT=/);
-  assert.match(output, /local _KW=\{/);
+  assert.match(output, /local _D=/);
+  assert.match(output, /local _KW="[^"\n]+"/);
 });
 
 test("supports nested table constructors and index assignment", () => {
   const output = compileLuaSubset("local t = {child={value=3}} t.child.value=4 print(t.child.value)", { seed: 23 });
-  assert.match(output, /local _BC=\{/);
+  assert.match(output, /local _D="[^"\n]+"/);
 });
