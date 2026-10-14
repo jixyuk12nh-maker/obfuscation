@@ -1,6 +1,9 @@
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 const sourceEl = document.querySelector("#source");
+const languageModeEl = document.querySelector("#languageMode");
+const languageHintEl = document.querySelector("#languageHint");
+const compileHintEl = document.querySelector("#compileHint");
 const outputEl = document.querySelector("#output");
 const compileBtn = document.querySelector("#compile");
 const copyBtn = document.querySelector("#copy");
@@ -220,6 +223,20 @@ sourceDropzone.addEventListener("drop", async event => {
     }
 });
 
+function updateLanguageHint() {
+    if (languageModeEl.value === "luau") {
+        languageHintEl.textContent = "Luau syntax-preserving lexical obfuscation; no VM conversion.";
+        compileHintEl.textContent = "Use for Roblox Luau, including Luau-only syntax.";
+    } else {
+        languageHintEl.textContent = "VM compilation for the supported subset; lexical fallback otherwise.";
+        compileHintEl.textContent = "Use for standard Lua; verify the exact Lua version.";
+    }
+    clearOutput();
+}
+
+languageModeEl.addEventListener("change", updateLanguageHint);
+updateLanguageHint();
+
 compileBtn.addEventListener("click", async () => {
     if (isCompiling || !checkSourceSize()) return;
 
@@ -242,7 +259,8 @@ compileBtn.addEventListener("click", async () => {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                source: sourceEl.value
+                source: sourceEl.value,
+                language: languageModeEl.value
             })
         });
 

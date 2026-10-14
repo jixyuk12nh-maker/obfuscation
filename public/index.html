@@ -23,14 +23,14 @@
         </span>
         <span class="brand-copy">
           <strong>LuaMoon</strong>
-          <span>VM Obfuscator</span>
+          <span>Lua / Luau Obfuscator</span>
         </span>
       </a>
       <span class="version"><span class="live-dot"></span>MVP · v0.1</span>
     </header>
 
     <section class="hero" aria-labelledby="page-title">
-      <p class="eyebrow">LUA 5.1 <span>·</span> LUAU SUBSET</p>
+      <p class="eyebrow">LUA <span>·</span> ROBLOX LUAU</p>
       <h1 id="page-title">Protect your script.<br><span>Keep control.</span></h1>
       <p class="intro">A focused workspace for your Lua source. Load a file or paste your code below to get started.</p>
     </section>
@@ -62,6 +62,15 @@
           <button id="removeFile" class="remove-file" type="button" aria-label="Remove loaded file">×</button>
         </div>
 
+        <div class="language-row">
+          <label for="languageMode">Target syntax</label>
+          <select id="languageMode" aria-label="Target Lua syntax">
+            <option value="lua">Lua 5.1–5.4</option>
+            <option value="luau">Roblox Luau</option>
+          </select>
+          <span id="languageHint">VM compilation where supported; lexical fallback otherwise.</span>
+        </div>
+
         <div class="editor-wrap" id="sourceDropzone">
           <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Lua source code" placeholder="Paste your Lua source here, or use Upload file…"></textarea>
           <div id="dropHint" class="drop-hint" aria-hidden="true" hidden>
@@ -77,7 +86,7 @@
 
       <div class="actions">
         <button id="compile" class="primary" type="button">Obfuscate <span aria-hidden="true">→</span></button>
-        <p>Unsupported syntax will show an error.</p>
+        <p id="compileHint">Choose the target syntax that matches your runtime.</p>
       </div>
 
       <div class="pane output-pane">
@@ -93,7 +102,7 @@
         </div>
 
         <div class="editor-wrap output-wrap">
-          <textarea id="output" spellcheck="false" readonly placeholder="Your generated VM wrapper will appear here…" aria-label="Generated Lua output"></textarea>
+          <textarea id="output" spellcheck="false" readonly placeholder="Your obfuscated output will appear here…" aria-label="Obfuscated output"></textarea>
           <div id="outputEmpty" class="output-empty" aria-hidden="true">
             <span class="output-orbit">✳</span>
             <span>Output will appear here</span>
@@ -113,7 +122,7 @@
       <span class="notice-icon" aria-hidden="true">i</span>
       <div>
         <strong>Know the limits</strong>
-        <p>This is an experimental compiler for a limited Lua/Luau subset. Unsupported syntax may fail to compile. Generated scripts should be tested in your target runtime. Obfuscation is not unbreakable encryption.</p>
+        <p>Lua and Roblox Luau use separate processing paths. Lua mode uses the VM compiler only for its supported subset; Luau mode preserves Luau-specific syntax using lexical obfuscation. Neither mode guarantees complete AST-level obfuscation for every language feature. Always test output in the exact target runtime.</p>
       </div>
     </section>
 

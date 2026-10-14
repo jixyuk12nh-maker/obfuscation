@@ -200,6 +200,39 @@ button:disabled {
   box-shadow: 0 10px 35px rgba(0, 0, 0, .08);
 }
 
+
+.language-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, .015);
+}
+
+.language-row label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.language-row select {
+  min-height: 32px;
+  padding: 5px 28px 5px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #17151d;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.language-row span {
+  flex: 1 1 220px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .pane-head {
   display: flex;
   min-height: 53px;
