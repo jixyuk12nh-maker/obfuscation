@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compileLuaSubset } from "./compiler.js";
+import { compileLuaSubset, compileLuaVm } from "./compiler.js";
 
 const obfuscate = (source, language = "lua", seed = 123) => compileLuaSubset(source, { language, seed });
 
@@ -156,4 +156,55 @@ print(x)`;
   assert.equal(output.split("\n").length, source.split("\n").length);
   assert.equal(output.includes("second"), false);
   assert.match(output, /print\(x\)/);
+});
+
+
+test("renames eligible top-level locals without changing method names or table keys", () => {
+  const source = `local Library = loadstring(game:HttpGet("https://example.test/Library.lua"))()
+local Window = Library:CreateWindow({Title = "Obsidian"})
+Window:Notify({Content = "ready"})`;
+  const output = compileLuaSubset(source, { language: "luau", seed: 876, renameLocals: true });
+  assert.equal(output.includes("local Library"), false);
+  assert.equal(output.includes("local Window"), false);
+  assert.match(output, /:CreateWindow\(/);
+  assert.match(output, /:Notify\(/);
+  assert.match(output, /\{Title =/);
+  assert.match(output, /\{Content =/);
+  assert.equal(output.includes("https://example.test/Library.lua"), false);
+});
+
+test("conservatively skips local renaming when Luau type syntax is present", () => {
+  const source = `--!strict
+local state: string = "ready"
+print(state)`;
+  const output = compileLuaSubset(source, { language: "luau", seed: 877, renameLocals: true });
+  assert.match(output, /local state: string =/);
+  assert.match(output, /print\(state\)/);
+  assert.equal(output.includes('"ready"'), false);
+});
+
+
+test("VM mode emits encoded bytecode wrapper instead of the original source", () => {
+  const source = `local message = "VM_SECRET_MARKER"
+local count = 2
+if count > 1 then print(message .. "!") else warn("no") end`;
+  const output = compileLuaVm(source, { language: "lua", seed: 900 });
+  assert.match(output, /^return \(function\(\)/);
+  assert.equal(output.includes("VM_SECRET_MARKER"), false);
+  assert.equal(output.includes('local message ='), false);
+  assert.ok(output.length > source.length * 2);
+});
+
+test("VM mode parses colon method calls and preserves method semantics in bytecode", () => {
+  const source = `local obj = game:GetService("Players")
+obj:FindFirstChild("Player")`;
+  const output = compileLuaVm(source, { language: "luau", seed: 901 });
+  assert.equal(output.includes("FindFirstChild"), false);
+  assert.equal(output.includes("Players"), false);
+  assert.match(output, /local _KW=/);
+  assert.match(output, /local _D=/);
+});
+
+test("VM mode rejects unsupported typed Luau rather than silently claiming virtualization", () => {
+  assert.throws(() => compileLuaVm('local value: string = "x"', { language: "luau", seed: 902 }), /type declarations/i);
 });

@@ -1,4 +1,4 @@
-import { compileLuaSubset } from "./compiler.js";
+import { compileLuaSubset, compileLuaVm } from "./compiler.js";
 
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 55 * 1024 * 1024;
@@ -19,7 +19,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/health") {
-      return json({ ok: true, service: "LuaMoon", engine: "LuaMoon syntax-preserving Lua/Luau lexical obfuscator" });
+      return json({ ok: true, service: "LuaMoon", engine: "LuaMoon compatibility transformer plus experimental bytecode VM mode" });
     }
 
     if (url.pathname === "/api/obfuscate") {
@@ -62,13 +62,19 @@ export default {
 
       try {
         const language = data.language === "luau" ? "luau" : "lua";
-        const output = compileLuaSubset(data.source, { language });
+        const mode = data.mode === "vm" ? "vm" : "compatibility";
+        const output = mode === "vm"
+          ? compileLuaVm(data.source, { language })
+          : compileLuaSubset(data.source, { language, renameLocals: true });
         return json({
           output,
           language,
-          note: language === "luau"
-            ? "Luau mode preserves source syntax and applies token-aware string encoding/comment removal. Luau type literals, directives, and backtick interpolated strings are preserved where needed. This is syntax-preserving lexical obfuscation, not AST-level control-flow obfuscation; validate in Roblox Luau."
-            : "Lua mode preserves source syntax and applies token-aware string encoding/comment removal. This avoids rejecting constructs outside the prototype VM subset, but does not perform AST-level control-flow obfuscation. Validate in the exact target Lua runtime."
+          mode,
+          note: mode === "vm"
+            ? "Experimental bytecode VM mode: source is parsed into a limited AST, compiled to encoded VM instructions, and executed by an embedded interpreter. It supports only a subset of Lua/Luau; validate with the exact target runtime."
+            : language === "luau"
+              ? "Compatibility mode preserves broad Luau source syntax and applies token-aware string encoding/comment removal plus conservative local renaming. This is not VM virtualization."
+              : "Compatibility mode preserves broad Lua source syntax and applies token-aware string encoding/comment removal plus conservative local renaming. This is not VM virtualization."
         });
       } catch (error) {
         return json({ error: error?.message || "Compilation failed." }, 400);
