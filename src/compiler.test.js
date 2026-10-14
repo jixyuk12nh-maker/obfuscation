@@ -8,7 +8,9 @@ test("obfuscates ordinary Lua strings without wrapping source in loadstring", ()
   const source = 'local message = "hello"; print(message)';
   const output = obfuscate(source);
   assert.equal(output.includes('"hello"'), false);
-  assert.match(output, /\\104\\101\\108\\108\\111/);
+  assert.match(output, /local _[A-Za-z0-9_]+=/);
+  assert.match(output, /_[A-Za-z0-9_]+\("[^"]*",\d+,\d+\)/);
+  assert.equal(output.includes("hello"), false);
   assert.equal(output.includes("loadstring"), false);
 });
 
@@ -60,6 +62,23 @@ test("preserves Luau-specific syntax such as compound assignment, continue, and 
   const source = `type Box<T> = { value: T }\nlocal x: number = 0\nwhile x < 3 do x += 1 if x == 2 then continue end end\nlocal y = x :: number`;
   const output = obfuscate(source, "luau", 12);
   for (const fragment of ["type Box<T>", "value: T", "x += 1", "continue", "x :: number"]) assert.ok(output.includes(fragment), fragment);
+});
+
+test("uses runtime decoding with per-string rolling masks and randomized alphabets", () => {
+  const source = 'local first = "secret-one"\nlocal second = "secret-two"\nprint(first, second)';
+  const output = obfuscate(source, "lua", 9001);
+  assert.equal(output.includes("secret-one"), false);
+  assert.equal(output.includes("secret-two"), false);
+  assert.match(output, /local _[A-Za-z0-9_]+=/);
+  assert.equal((output.match(/_[A-Za-z0-9_]+\("/g) || []).length, 2);
+  assert.match(output, /,\d+,\d+\)/);
+});
+
+test("keeps Luau directives before the injected decoder", () => {
+  const output = obfuscate('--!strict\nlocal message = "private"', "luau", 31337);
+  assert.ok(output.startsWith("--!strict\n"));
+  assert.ok(output.indexOf("local _") > output.indexOf("--!strict"));
+  assert.equal(output.includes("private"), false);
 });
 
 test("supports randomized string encoding across builds", () => {

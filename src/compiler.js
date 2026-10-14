@@ -771,49 +771,88 @@ function decodeLuaStringBytes(raw, kind) {
   }
   const bytes = [];
   const pushText = value => bytes.push(...new TextEncoder().encode(value));
-  for (let i = 1; i < raw.length - 1; i++) {
+  for (let i = 1; i < raw.length - 1;) {
     let c = raw[i];
-    if (c !== "\\") { pushText(c); continue; }
-    if (++i >= raw.length - 1) throw new Error("Unfinished escape in string literal.");
+    if (c !== "\\") {
+      const cp = raw.codePointAt(i);
+      const char = String.fromCodePoint(cp);
+      pushText(char);
+      i += char.length;
+      continue;
+    }
+    i++;
+    if (i >= raw.length - 1) throw new Error("Unfinished escape in string literal.");
     c = raw[i];
     const simple = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, "\"": 34, "'": 39 };
-    if (Object.hasOwn(simple, c)) { bytes.push(simple[c]); continue; }
-    if (c === "\n") { bytes.push(10); continue; }
-    if (c === "\r") { if (raw[i + 1] === "\n") i++; bytes.push(10); continue; }
-    if (c === "z") { while (i + 1 < raw.length - 1 && /\s/.test(raw[i + 1])) i++; continue; }
+    if (Object.hasOwn(simple, c)) { bytes.push(simple[c]); i++; continue; }
+    if (c === "\n") { bytes.push(10); i++; continue; }
+    if (c === "\r") { if (raw[i + 1] === "\n") i++; bytes.push(10); i++; continue; }
+    if (c === "z") { i++; while (i < raw.length - 1 && /\s/.test(raw[i])) i++; continue; }
     if (c === "x" && /^[0-9a-fA-F]{2}$/.test(raw.slice(i + 1, i + 3))) {
-      bytes.push(parseInt(raw.slice(i + 1, i + 3), 16)); i += 2; continue;
+      bytes.push(parseInt(raw.slice(i + 1, i + 3), 16)); i += 3; continue;
     }
     if (c === "u" && raw[i + 1] === "{") {
       const end = raw.indexOf("}", i + 2);
       if (end < 0) throw new Error("Invalid Unicode escape in string literal.");
       const cp = parseInt(raw.slice(i + 2, end), 16);
-      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) throw new Error("Invalid Unicode escape in string literal.");
-      pushText(String.fromCodePoint(cp)); i = end; continue;
+      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) throw new Error("Invalid Unicode escape in string literal.");
+      pushText(String.fromCodePoint(cp)); i = end + 1; continue;
     }
     if (/[0-9]/.test(c)) {
       let digits = c;
       while (digits.length < 3 && /[0-9]/.test(raw[i + 1] || "")) digits += raw[++i];
       const n = Number(digits);
       if (n > 255) throw new Error("Decimal escape exceeds 255.");
-      bytes.push(n); continue;
+      bytes.push(n); i++; continue;
     }
     pushText(c);
+    i++;
   }
   return bytes;
 }
 
-function luaStringExpression(bytes, rng) {
-  if (!bytes.length) return '""';
-  const chunks = [];
-  let i = 0;
-  while (i < bytes.length) {
-    const size = 1 + Math.floor(rng() * 8);
-    const raw = bytes.slice(i, i + size).map(byte => `\\${String(byte).padStart(3, "0")}`).join("");
-    chunks.push(`"${raw}"`);
-    i += size;
+function luaStringExpression(bytes, rng, decoderName, alphabet) {
+  const key = 1 + Math.floor(rng() * 255);
+  const stride = 1 + Math.floor(rng() * 255);
+  const cipher = bytes.map((byte, index) => byte ^ ((key + index * stride) & 0xff));
+  const payload = base64Encode(cipher, alphabet);
+  return `${decoderName}(${JSON.stringify(payload)},${key},${stride})`;
+}
+
+function makeDecoderName(source, rng) {
+  const first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+  const rest = first + "0123456789";
+  for (let attempt = 0; attempt < 100; attempt++) {
+    let name = "_";
+    for (let i = 0; i < 13; i++) name += (i === 0 ? first : rest)[Math.floor(rng() * (i === 0 ? first : rest).length)];
+    if (!source.includes(name)) return name;
   }
-  return chunks.length === 1 ? chunks[0] : `(${chunks.join(" .. ")})`;
+  throw new Error("Unable to generate a collision-free string decoder name.");
+}
+
+function makeStringDecoder(name, alphabet) {
+  // One chunk-local helper decodes a per-build alphabet and per-string rolling XOR mask.
+  // This raises the cost of casual string extraction but is not cryptographic protection.
+  return `local ${name}=(function(A)local M={} for i=1,#A do M[string.sub(A,i,i)]=i-1 end;return function(S,K,R)local O={} local V=0 local B=0 for i=1,#S do local N=M[string.sub(S,i,i)] if N then V=V*64+N B=B+6 if B>=8 then B=B-8 O[#O+1]=math.floor(V/2^B)%256 V=V%2^B end end end;local function X(a,b)local q,p=0,1 for _=1,8 do local c,d=a%2,b%2 if c~=d then q=q+p end a=math.floor(a/2) b=math.floor(b/2) p=p*2 end return q end;for i=1,#O do O[i]=string.char(X(O[i],(K+(i-1)*R)%256)) end;return table.concat(O) end end)(${JSON.stringify(alphabet)});`;
+}
+
+function preludeOffset(source) {
+  let pos = source.charCodeAt(0) === 0xfeff ? 1 : 0;
+  if (source.startsWith("#!", pos)) {
+    const end = source.indexOf("\n", pos);
+    pos = end < 0 ? source.length : end + 1;
+  }
+  while (pos < source.length) {
+    const end = source.indexOf("\n", pos);
+    const lineEnd = end < 0 ? source.length : end;
+    const line = source.slice(pos, lineEnd);
+    if (/^\s*$/.test(line) || /^\s*--!/.test(line)) {
+      pos = end < 0 ? source.length : end + 1;
+      continue;
+    }
+    break;
+  }
+  return pos;
 }
 
 function hasLuauTypeSyntax(source) {
@@ -850,6 +889,11 @@ function isLuauTypeStringLiteral(source, start) {
 function universalLexicalObfuscate(source, rng, options = {}) {
   const language = options.language === "luau" ? "luau" : "lua";
   const replacements = [];
+  const alphabetChars = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,-./:;<>?@[]^_`{|}~");
+  shuffleArray(alphabetChars, rng);
+  const alphabet = alphabetChars.slice(0, 64).join("");
+  const decoderName = makeDecoderName(source, rng);
+  let encodedStringCount = 0;
   let i = 0;
   while (i < source.length) {
     const c = source[i];
@@ -865,7 +909,8 @@ function universalLexicalObfuscate(source, rng, options = {}) {
       const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
       if (!preserveTypeLiteral) {
         const raw = source.slice(start, i);
-        replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "quoted"), rng) });
+        replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "quoted"), rng, decoderName, alphabet) });
+        encodedStringCount++;
       }
       continue;
     }
@@ -880,7 +925,8 @@ function universalLexicalObfuscate(source, rng, options = {}) {
         const preserveTypeLiteral = language === "luau" && isLuauTypeStringLiteral(source, start);
         if (!preserveTypeLiteral) {
           const raw = source.slice(start, i);
-          replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "long"), rng) });
+          replacements.push({ start, end: i, text: luaStringExpression(decodeLuaStringBytes(raw, "long"), rng, decoderName, alphabet) });
+          encodedStringCount++;
         }
         continue;
       }
@@ -922,6 +968,14 @@ function universalLexicalObfuscate(source, rng, options = {}) {
   for (let r = replacements.length - 1; r >= 0; r--) {
     const item = replacements[r];
     output = output.slice(0, item.start) + item.text + output.slice(item.end);
+  }
+  if (encodedStringCount > 0) {
+    const originalOffset = preludeOffset(source);
+    let adjustedOffset = originalOffset;
+    for (const item of replacements) {
+      if (item.end <= originalOffset) adjustedOffset += item.text.length - (item.end - item.start);
+    }
+    output = output.slice(0, adjustedOffset) + makeStringDecoder(decoderName, alphabet) + output.slice(adjustedOffset);
   }
   return output;
 }
